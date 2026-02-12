@@ -70,6 +70,18 @@ impl RecorderState {
         self.current = None;
         self.state = AppState::Idle;
     }
+
+    pub fn replace_segment(&mut self, index: usize, new_segment: Segment) {
+        self.project.segments[index] = new_segment;
+    }
+
+    fn silence(seconds: f32, sample_rate: u32) -> Segment {
+        let count = (seconds * sample_rate as f32) as usize;
+        Segment {
+            samples: vec![0.0; count],
+            duration_samples: count,
+        }
+    }
 }
 // write logic for RecorderState without audio
 // unit test the entire workflow without needing audio
