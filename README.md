@@ -1,0 +1,5 @@
+An application to record voice-over audio in manageable chunks with a built-in review workflow. This tool is designed for situations where you need to record long-form content-like narration, podcasts, or voice-overs without the pressure of getting everything perfect in a single continuous take.
+
+## The problem this solves
+
+Traditional recording software forces you to choose between two frustrating workflows: either record everything in one giant file and edit out the mistakes later, or stop and start the recording repeatedly, which becomes tedious. This project offers a middle path. You record in short segments, review each one immediately, and decide on the spot whether to keep or redo the segment with a single keypress. The good takes get appended to your project automatically. No need to mess around with the audio timeline.
