@@ -1,5 +1,9 @@
-use hound;
+use hound; // write wav files
 use crate::state::Project;
+
+// iterate through every segment in the project
+// then convert the internal f32 samples to i16 (standard WAV format)
+// Write them sequentially to output.wav, which "appends" every chunk into one file
 
 pub fn export_wav(project: &Project, path: &str) {
     let spec = hound::WavSpec {
