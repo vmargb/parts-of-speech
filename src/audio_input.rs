@@ -1,4 +1,4 @@
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait}; // audio driver
+use cpal::traits::{DeviceTrait, HostTrait};
 use std::sync::{Arc, Mutex};
 
 use crate::state::{AppState, RecorderState};

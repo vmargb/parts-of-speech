@@ -4,8 +4,8 @@ mod audio_output;
 mod export;
 
 use std::sync::{Arc, Mutex};
-
 use state::RecorderState;
+use cpal::traits::StreamTrait;
 
 // ** input **
 // Microphone -> audio_input.rs ->(samples only)
@@ -31,38 +31,145 @@ use state::RecorderState;
 // Finish: Type `e`. export.rs combines all project.segments into one WAV file
 
 fn main() {
-    let recorder = Arc::new(Mutex::new(
+    let recorder_state = Arc::new(Mutex::new(
         RecorderState::new(44100, 1),
     ));
+    
+    let stream = audio_input::start_input_stream(recorder_state.clone());
+    stream.play().unwrap(); // StreamTrait
 
-    let stream = audio_input::start_input_stream(recorder.clone());
-    stream.play().unwrap();
+    println!("️Audio Recorder - Non-linear Editing Mode");
+    println!("Commands:");
+    println!("  r           → Record new segment (appends to end)");
+    println!("  s           → Stop recording current segment");
+    println!("  p           → Play last recorded segment");
+    println!("  p <n>       → Play segment #n (e.g., p 5)");
+    println!("  pa          → Play ALL segments (full project)");
+    println!("  retry <n>   → Re-record segment #n");
+    println!("  insert <n>  → Insert new segment AFTER #n");
+    println!("  c           → Confirm current segment");
+    println!("  x           → Reject current segment");
+    println!("  e           → Export and exit");
+    println!("  q           → Show segment list");
+    println!();
 
-    // temporary CLI control loop for now (replace with GUI later)
     loop {
-        println!("r=start, s=stop, c=confirm, x=reject, p=play last, e=export");
+       let recorder = recorder_state.lock().unwrap(); // mutexguard
+        let count = recorder.get_segment_count();
+        let status = match recorder.state {
+            state::AppState::Idle => format!("Idle ({} segments)", count),
+            state::AppState::Recording => "Recording...".to_string(),
+            state::AppState::Reviewing => "Reviewing (c=confirm, x=reject)".to_string(),
+        };
+        print!("{} > ", status);
+        drop(recorder); // Unlock before reading input
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).unwrap();
+        let parts: Vec<&str> = input.trim().split_whitespace().collect();
 
-        let mut recorder = recorder.lock().unwrap();
+        if parts.is_empty() {
+            continue;
+        }
 
-        match input.trim() {
-            "r" => recorder.start_recording(), // record
-            "s" => recorder.stop_recording(), // stop
-            "c" => recorder.approve(), // confirm
-            "x" => recorder.reject(), // reject
-            "p" => { // play
-                if let Some(seg) = recorder.project.segments.last() {
-                    drop(recorder); // unlock before playback
-                    audio_output::play_segment(seg, 44100);
+        let mut recorder = recorder_state.lock().unwrap();
+
+        match parts[0] {
+            "r" => {
+                recorder.start_recording();
+                println!("Recording new segment...");
+            }
+            "s" => {
+                recorder.stop_recording();
+                println!("Stopped. Press 'c' to confirm or 'x' to reject.");
+            }
+            "c" => {
+                recorder.approve();
+                println!("Segment confirmed!");
+            }
+            "x" => {
+                recorder.reject();
+                println!("Segment rejected.");
+            }
+            "p" => {
+                drop(recorder); // Release the primary loop lock so playback doesn't block input
+
+                if parts.len() > 1 {
+                    // Case: p <n>
+                    if let Ok(idx) = parts[1].parse::<usize>() {
+                        let rec = recorder_state.lock().unwrap(); // Use recorder_state, not recorder
+                        if idx > 0 && idx <= rec.get_segment_count() {
+                            if let Some(seg) = rec.get_segment(idx - 1) { // Assuming 1-based input
+                                println!("Playing segment {}...", idx);
+                                audio_output::play_segment(seg.clone(), 44100);
+                            }
+                        } else {
+                            println!("Segment {} not found", idx);
+                        }
+                    }
+                } else {
+                    // Case: p (last segment)
+                    let rec = recorder_state.lock().unwrap(); // Use recorder_state
+                    if let Some(seg) = rec.project.segments.last() {
+                        println!("Playing last segment...");
+                        audio_output::play_segment(seg.clone(), 44100);
+                    } else {
+                        println!("No segments recorded yet");
+                    }
                 }
             }
-            "e" => { // export
+            "pa" => {
+                drop(recorder); // Release the primary loop lock
+                let rec = recorder_state.lock().unwrap(); // Use recorder_state
+                if rec.project.segments.is_empty() {
+                    println!("No segments to play");
+                } else {
+                    println!("Playing full project ({} segments)...", rec.get_segment_count());
+                    audio_output::play_project(&rec.project);
+                }
+            }
+            // "retry" => {
+            //     if parts.len() > 1 {
+            //         if let Ok(idx) = parts[1].parse::<usize>() {
+            //             if idx == 0 || idx > recorder.get_segment_count() {
+            //                 println!("Invalid segment number (1-{})", recorder.get_segment_count());
+            //             } else {
+            //                 recorder.retry_segment(idx - 1); // Convert to 0-based
+            //                 println!("Re-recording segment {}...", idx);
+            //             }
+            //         }
+            //     } else {
+            //         println!("Usage: retry <segment_number>");
+            //     }
+            // }
+            "insert" => {
+                if parts.len() > 1 {
+                    if let Ok(idx) = parts[1].parse::<usize>() {
+                        if idx == 0 || idx > recorder.get_segment_count() {
+                            println!("Invalid segment number (1-{})", recorder.get_segment_count());
+                        } else {
+                            recorder.insert_segment(idx - 1); // Convert to 0-based
+                            println!("Inserting new segment after #{}...", idx);
+                        }
+                    }
+                } else {
+                    println!("Usage: insert <segment_number>");
+                }
+            }
+            "q" => {
+                println!("  📋 Segments:");
+                for (i, _) in recorder.project.segments.iter().enumerate() {
+                    println!("     #{} ({} samples)", i + 1, recorder.project.segments[i].samples.len());
+                }
+            }
+            "e" => {
                 export::export_wav(&recorder.project, "output.wav");
+                println!("Exported to output.wav");
                 break;
             }
-            _ => {}
+            _ => {
+                println!("Unknown command. Type 'h' for help.");
+            }
         }
     }
 }
