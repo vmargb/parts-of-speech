@@ -128,32 +128,40 @@ fn main() {
                     audio_output::play_project(&rec.project);
                 }
             }
-            // "retry" => {
-            //     if parts.len() > 1 {
-            //         if let Ok(idx) = parts[1].parse::<usize>() {
-            //             if idx == 0 || idx > recorder.get_segment_count() {
-            //                 println!("Invalid segment number (1-{})", recorder.get_segment_count());
-            //             } else {
-            //                 recorder.retry_segment(idx - 1); // Convert to 0-based
-            //                 println!("Re-recording segment {}...", idx);
-            //             }
-            //         }
-            //     } else {
-            //         println!("Usage: retry <segment_number>");
-            //     }
-            // }
+            "retry" => {
+                if let Some(idx_str) = parts.get(1) {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if idx > 0 && recorder.retry_segment(idx - 1) { // convert to 0-based
+                            println!("  → Re-recording segment {}...", idx);
+                        } else {
+                            println!("  ✗ Invalid segment number.");
+                        }
+                    }
+                }
+            }
             "insert" => {
-                if parts.len() > 1 {
+                if parts.len() > 1 { // at least 1 segment
                     if let Ok(idx) = parts[1].parse::<usize>() {
                         if idx == 0 || idx > recorder.get_segment_count() {
                             println!("Invalid segment number (1-{})", recorder.get_segment_count());
                         } else {
-                            recorder.insert_segment(idx - 1); // Convert to 0-based
+                            recorder.insert_segment(idx - 1); // 1-based index
                             println!("Inserting new segment after #{}...", idx);
                         }
                     }
                 } else {
                     println!("Usage: insert <segment_number>");
+                }
+            }
+            "delete" => {
+                if let Some(idx_str) = parts.get(1) {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if idx > 0 && recorder.delete_segment(idx - 1) { // convert to 0-based
+                            println!("  🗑️ Segment {} deleted.", idx);
+                        } else {
+                            println!("  ✗ Invalid segment number.");
+                        }
+                    }
                 }
             }
             "q" => {
