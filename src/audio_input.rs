@@ -27,11 +27,23 @@ pub fn start_input_stream(recorder: Arc<Mutex<RecorderState>>) -> cpal::Stream {
     let stream = device.build_input_stream(
         &config.into(),
         move |data: &[f32], _| {
-            // try_lock to avoid blocking the audio thread if main is busy
-            if let Ok(mut recorder) = recorder.try_lock() {
-                if let AppState::Recording = recorder.state {
-                    if let Some(seg) = recorder.current.as_mut() {
-                        seg.samples.extend_from_slice(data);
+            // try_lock to keep the audio thread "real-time"
+            // and prevent main.rs blocking the thread
+            if let Ok(mut rec) = recorder.try_lock() {
+                if let AppState::Recording = rec.state {
+                    if let Some(seg) = rec.current.as_mut() {
+                        if hardware_channels == 1 { // mono, just copy
+                            seg.samples.extend_from_slice(data);
+                        } else {
+                            // hardware is Stereo (or more), down-mix to Mono
+                            // .chunks_exact(2) gives us [[L, R], [L, R], ...]
+                            // so simply do L + R / 2
+                            let mono_data = data.chunks_exact(hardware_channels.into()).map(|frame| {
+                                // convert hardware_channels u16 into usize
+                                frame.iter().sum::<f32>() / hardware_channels as f32
+                            });
+                            seg.samples.extend(mono_data);
+                        }
                     }
                 }
             }
