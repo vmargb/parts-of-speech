@@ -13,9 +13,9 @@ pub struct Segment { // a single recording take
 // #[derive(clone)] lets you duplicate a segment
 // for recording replacements (retry)
 
-#[allow(unused)]
 impl Segment {
     // 1 second of pub samples = 44100 indexes (sample_rate)
+    #[allow(unused)]
     pub fn duration_seconds(&self, sample_rate: u32) -> f32 {
         self.samples.len() as f32 / sample_rate as f32
     }
@@ -142,6 +142,7 @@ impl RecorderState { // master struct
 
     // optionally add empty segments in between recordings
     // silence(0.5, sample_rate) would add a 0.5s silence
+    #[allow(unused)]
     fn silence(seconds: f32, sample_rate: u32) -> Segment {
         let count = (seconds * sample_rate as f32) as usize;
         Segment {
@@ -151,6 +152,7 @@ impl RecorderState { // master struct
 
     // *** Helpers ***
 
+    #[allow(unused)]
     pub fn total_duration(&self) -> f32 {
         self.project.segments
             .iter()

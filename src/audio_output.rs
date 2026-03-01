@@ -3,9 +3,10 @@ use std::num::{NonZeroU16, NonZeroU32}; // positive channel and sample_rate
 use crate::state::{Segment, Project};
 
 pub fn play_segment(segment: Segment, sample_rate: u32) {
-    let handle = DeviceSinkBuilder::open_default_sink()
+    let mut handle = DeviceSinkBuilder::open_default_sink()
         .expect("Failed to open default audio device");
-    
+    handle.log_on_drop(false);
+
     let player = Player::connect_new(handle.mixer()); // connect to audio device
     
     let channels = NonZeroU16::new(1).unwrap();
@@ -17,8 +18,9 @@ pub fn play_segment(segment: Segment, sample_rate: u32) {
 }
 
 pub fn play_project(project: &Project) {
-    let handle = DeviceSinkBuilder::open_default_sink()
+    let mut handle = DeviceSinkBuilder::open_default_sink()
         .expect("Failed to open default audio device");
+    handle.log_on_drop(false);
     
     let player = Player::connect_new(handle.mixer());
 

@@ -35,6 +35,7 @@ fn main() {
         RecorderState::new(44100, 1),
     ));
     
+    // always listening, only saved when AppState::Recording
     let stream = audio_input::start_input_stream(recorder_state.clone());
     stream.play().unwrap(); // StreamTrait
 
@@ -46,6 +47,7 @@ fn main() {
     println!("  p <n>       → Play segment #n (e.g., p 5)");
     println!("  pa          → Play ALL segments (full project)");
     println!("  retry <n>   → Re-record segment #n");
+    println!("  delete <n>  → Delete segment #n");
     println!("  insert <n>  → Insert new segment AFTER #n");
     println!("  c           → Confirm current segment");
     println!("  x           → Reject current segment");
@@ -79,9 +81,9 @@ fn main() {
                 recorder.start_recording();
                 println!("Recording new segment...");
             }
-            "s" => {
+            "s" => { // auto-play last segment when stopping
                 recorder.stop_recording();
-                println!("Stopped. Press 'c' to confirm or 'x' to reject.");
+                println!("Press 'c' to confirm or 'x' to reject.");
             }
             "c" => {
                 recorder.approve();

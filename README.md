@@ -4,7 +4,7 @@ A voice-over audio application that records your voice in manageable chunks with
 
 Traditional recording software forces you to choose between two frustrating workflows: either record everything in one giant file and edit out the mistakes later(which can take hours), or stop and start the recording repeatedly, which becomes tedious. This project offers a middle path. You record in short segments, review each one immediately, and decide on the spot whether to keep or redo the segment with a single keypress. The good takes get appended to your project automatically. No need to mess around with the audio timeline.
 
-You then just throw the exported output into Audacity(or your preferred editor) and apply your usual effects in a single pas without any further editing.
+You then just throw the exported output into Audacity(or your preferred editor) and apply your usual effects in a single pass without any further editing.
 
 
 ## Command Summary
