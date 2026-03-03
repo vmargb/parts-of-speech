@@ -21,3 +21,7 @@ You then just throw the exported output into Audacity(or preferred editor) and a
 | `c`             | Confirm      | Approve the current segment.                      |
 | `x`             | Reject       | Reject the current segment.                       |
 | `e`             | Export       | Export all confirmed segments and exit.           |
+
+
+## Proposals
+- GUI with clickable/moveable segments

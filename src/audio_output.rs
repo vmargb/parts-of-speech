@@ -15,7 +15,7 @@ pub fn play_segment_async(
     segment: Segment,
     sample_rate: u32,
     recorder: Arc<Mutex<crate::state::RecorderState>>,
-    on_done: impl fn() + Send + 'static // callback after playback finished
+    on_done: impl Fn() + Send + 'static // callback after playback finished
 ) {
     // set as playing before spawning to disable input
     {
@@ -76,9 +76,9 @@ pub fn play_project_async(
             return;
         }
 
-        let channels = NonZeroU16::new(project.channels)
+        let channels = NonZeroU16::new(project_snapshot.channels)
             .expect("Invalid channel count");
-        let rate = NonZeroU32::new(project.sample_rate)
+        let rate = NonZeroU32::new(project_snapshot.sample_rate)
             .expect("Invalid sample rate");
 
         let source = SamplesBuffer::new(channels, rate, all_samples);

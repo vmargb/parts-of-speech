@@ -191,6 +191,7 @@ impl RecorderState { // master struct
     }
 
     // is it safe to start recording or playback?
+    #[allow(unused)]
     pub fn is_busy(&self) -> bool {
         matches!(self.state, AppState::Recording)
             || self.playback_state == PlaybackState::Playing // PartialEq
