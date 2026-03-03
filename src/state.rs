@@ -28,14 +28,38 @@ pub struct Project {
     pub editing_index: Option<usize>, // which segment we're editing (for retry/insert)
 }
 // persistent timeline of all segments (that were approved)
-// added together
 
 // ===== State =====
 
+// tracks the entire app state
 pub enum AppState {
     Idle,
     Recording,
     Reviewing, // keep or retry?
+}
+
+// tracks the audio_output thread state
+// avoids tangled state with AppState
+// e.g. Reviewing + Playing at the same time
+#[derive(PartialEq, Clone)]
+pub enum PlaybackState {
+    Idle,
+    Playing, // UI blocks input when playing
+}
+
+// separation of event loop and state, the UI dispatches enum commands
+// instead of calling methods directly
+pub enum Command {
+    StartRecording,
+    StopRecording,
+    Approve,
+    Reject,
+    PlaySegment(usize), // 0-based index
+    PlayAll,
+    RetrySegment(usize),
+    InsertAfter(usize),
+    DeleteSegment(usize),
+    Export(String), // path
 }
 
 pub struct RecorderState {
@@ -43,9 +67,8 @@ pub struct RecorderState {
     pub current: Option<Segment>, // current chunk being recorded/reviewed
     pub project: Project, // all chunks
     pub is_insertion: bool, // helps decide between replace vs insert
+    pub playback_state: PlaybackState,
 }
-// full picture of the state is held inside RecorderState
-
 
 // holds the the current segment being recorded, the state
 // and the project in which it will add the approved recording to
@@ -55,6 +78,7 @@ impl RecorderState { // master struct
             state: AppState::Idle,
             current: None, // current recording segment
             is_insertion: false,
+            playback_state: PlaybackState::Idle,
             project: Project {
                 segments: Vec::new(),
                 sample_rate,
@@ -70,9 +94,7 @@ impl RecorderState { // master struct
     pub fn start_recording(&mut self) {
         self.state = AppState::Recording;
         self.is_insertion = false; // append not insert
-        self.current = Some(Segment {
-            samples: Vec::new(),
-        });
+        self.current = Some(Segment { samples: Vec::new() });
         self.project.editing_index = None; // None: segment at end default
     }
 
@@ -167,6 +189,13 @@ impl RecorderState { // master struct
     pub fn get_segment_count(&self) -> usize {
         self.project.segments.len()
     }
+
+    // is it safe to start recording or playback?
+    pub fn is_busy(&self) -> bool {
+        matches!(self.state, AppState::Recording)
+            || self.playback_state == PlaybackState::Playing // PartialEq
+    }
+
 }
 // write logic for RecorderState without audio
 // unit test the entire workflow without needing audio
@@ -179,7 +208,6 @@ impl RecorderState { // master struct
 mod tests {
     use super::*;
 
-    // simulate recording audio data without mic
     fn simulate_recording(recorder: &mut RecorderState, data: Vec<f32>) {
         if let Some(ref mut seg) = recorder.current {
             seg.samples.extend(data);
@@ -190,22 +218,19 @@ mod tests {
     fn test_full_workflow() {
         let mut rec = RecorderState::new(44100, 1);
 
-        // 1. Record first segment
         rec.start_recording();
         simulate_recording(&mut rec, vec![1.0, 2.0, 3.0]);
         rec.stop_recording();
         rec.approve();
         assert_eq!(rec.get_segment_count(), 1);
 
-        // 2. Record second segment
         rec.start_recording();
         simulate_recording(&mut rec, vec![4.0, 5.0]);
         rec.stop_recording();
         rec.approve();
         assert_eq!(rec.get_segment_count(), 2);
 
-        // 3. Test Delete
-        rec.delete_segment(0); // Delete the [1,2,3] segment
+        rec.delete_segment(0);
         assert_eq!(rec.get_segment_count(), 1);
         assert_eq!(rec.project.segments[0].samples, vec![4.0, 5.0]);
     }
@@ -213,36 +238,31 @@ mod tests {
     #[test]
     fn test_retry_logic() {
         let mut rec = RecorderState::new(44100, 1);
-        
-        // Setup: Add one segment [1.0]
+
         rec.start_recording();
         simulate_recording(&mut rec, vec![1.0]);
         rec.stop_recording();
         rec.approve();
 
-        // Retry index 0
         rec.retry_segment(0);
-        simulate_recording(&mut rec, vec![9.9]); // New data
+        simulate_recording(&mut rec, vec![9.9]);
         rec.stop_recording();
         rec.approve();
 
         assert_eq!(rec.project.segments[0].samples, vec![9.9]);
-        assert_eq!(rec.get_segment_count(), 1); // Count shouldn't change
+        assert_eq!(rec.get_segment_count(), 1);
     }
 
     #[test]
     fn test_insert_logic() {
         let mut rec = RecorderState::new(44100, 1);
-        
-        // add initial segment [1.0] at index 0
+
         rec.start_recording();
         simulate_recording(&mut rec, vec![1.0]);
         rec.stop_recording();
         rec.approve();
 
-        // insert AFTER segment 1 (0 internally)
-        // user typed 'insert 1', so we call insert_segment(1-1)
-        rec.insert_segment(1-1); 
+        rec.insert_segment(0);
         simulate_recording(&mut rec, vec![2.0]);
         rec.stop_recording();
         rec.approve();
@@ -262,5 +282,37 @@ mod tests {
 
         assert_eq!(rec.get_segment_count(), 0);
         assert!(rec.current.is_none());
+    }
+
+    // test the Command enum dispatch these are only
+    // commands that don't involve audio I/O can be tested directly
+    #[test]
+    fn test_command_dispatch() {
+        let mut rec = RecorderState::new(44100, 1);
+
+        dispatch_command(&mut rec, Command::StartRecording);
+        simulate_recording(&mut rec, vec![0.5]);
+        dispatch_command(&mut rec, Command::StopRecording);
+        dispatch_command(&mut rec, Command::Approve);
+        assert_eq!(rec.get_segment_count(), 1);
+
+        dispatch_command(&mut rec, Command::DeleteSegment(0));
+        assert_eq!(rec.get_segment_count(), 0);
+    }
+}
+
+// state dispatch, called by main, no audio I/O, no threads
+// Note: audio_output commands(PlaySegment, PlayAll) are handled in main
+// because they need hold Arc<Mutex<RecorderState>> + threads and file I/O
+pub fn dispatch_command(rec: &mut RecorderState, cmd: Command) {
+    match cmd {
+        Command::StartRecording       => rec.start_recording(),
+        Command::StopRecording        => rec.stop_recording(),
+        Command::Approve              => rec.approve(),
+        Command::Reject               => rec.reject(),
+        Command::RetrySegment(i)      => { rec.retry_segment(i); }
+        Command::InsertAfter(i)       => { rec.insert_segment(i); }
+        Command::DeleteSegment(i)     => { rec.delete_segment(i); }
+        _ => {}
     }
 }
