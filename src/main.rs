@@ -106,6 +106,17 @@ impl RecorderApp {
                 dispatch_command(&mut rec, Command::Reject);
             }
 
+            Command::RetryCurrentTake => {
+                let rec = self.recorder.lock().unwrap();
+                if rec.playback_state == PlaybackState::Playing {
+                    println!( "Wait for playback to finish before retrying. ");
+                    return;
+                }
+                drop(rec);
+                let mut rec = self.recorder.lock().unwrap();
+                dispatch_command( &mut rec, Command::RetryCurrentTake);
+            }
+
             Command::PlaySegment(idx) => {
                 let rec = self.recorder.lock().unwrap();
                 if rec.playback_state == PlaybackState::Playing { return; } // already playing
@@ -167,7 +178,7 @@ fn main() {
                 state::AppState::Recording =>
                     "Recording...".to_string(),
                 state::AppState::Reviewing =>
-                    "Reviewing / c=confirm  x=reject  p=listen again".to_string(),
+                    "Reviewing / c=confirm  x=reject t=retry p=listen again".to_string(),
             }
         };
 
@@ -185,6 +196,7 @@ fn main() {
             "s"  => app.handle_command(Command::StopRecording),
             "c"  => app.handle_command(Command::Approve),
             "x"  => app.handle_command(Command::Reject),
+            "t" => app.handle_command(Command::RetryCurrentTake),
             "pa" => app.handle_command(Command::PlayAll),
 
             // "p" is context-sensitive, during Reviewing it calls play_current_segment()
@@ -211,7 +223,6 @@ fn main() {
                     }
                 }
             }
-
             "retry"  => {
                 if let Some(n) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) {
                     app.handle_command(Command::RetrySegment(n - 1));

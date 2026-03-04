@@ -32,6 +32,7 @@ pub struct Project {
 // ===== State =====
 
 // tracks the entire app state
+#[derive(PartialEq)]
 pub enum AppState {
     Idle,
     Recording,
@@ -54,6 +55,7 @@ pub enum Command {
     StopRecording,
     Approve,
     Reject,
+    RetryCurrentTake,
     PlaySegment(usize), // 0-based index
     PlayAll,
     RetrySegment(usize),
@@ -130,6 +132,19 @@ impl RecorderState { // master struct
         self.current = None; // delete current segment
         self.project.editing_index = None;
         self.state = AppState::Idle;
+    }
+
+    // retry the take that was just recorded
+    pub fn retry_current_take(&mut self) {
+        if self.state == AppState::Reviewing {
+            // Create a new empty segment for the retry
+            self.current = Some(Segment { samples: Vec::new() });
+            // Switch back to recording
+            self.state = AppState::Recording;
+            // IMPORTANT: We do NOT reset editing_index or is_insertion here.
+            // This ensures we retry the same slot (overwrite/insert/append) 
+            // rather than resetting to default append.
+        }
     }
 
     // *** Edit Methods ***
@@ -311,6 +326,7 @@ pub fn dispatch_command(rec: &mut RecorderState, cmd: Command) {
         Command::StopRecording        => rec.stop_recording(),
         Command::Approve              => rec.approve(),
         Command::Reject               => rec.reject(),
+        Command::RetryCurrentTake     => rec.retry_current_take(),
         Command::RetrySegment(i)      => { rec.retry_segment(i); }
         Command::InsertAfter(i)       => { rec.insert_segment(i); }
         Command::DeleteSegment(i)     => { rec.delete_segment(i); }
