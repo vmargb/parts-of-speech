@@ -84,6 +84,8 @@ impl RecorderApp {
                 self.play_current_segment(); // auto-play after stopping
             }
 
+            // *** dispatch commands
+
             Command::Approve => { // gated by playback state
                 let rec = self.recorder.lock().unwrap();
                 if rec.playback_state == PlaybackState::Playing {
@@ -114,8 +116,10 @@ impl RecorderApp {
                 }
                 drop(rec);
                 let mut rec = self.recorder.lock().unwrap();
-                dispatch_command( &mut rec, Command::RetryCurrentTake);
+                dispatch_command(&mut rec, Command::RetryCurrentTake);
             }
+
+            // *** Non-dispatch commands
 
             Command::PlaySegment(idx) => {
                 let rec = self.recorder.lock().unwrap();
@@ -178,7 +182,7 @@ fn main() {
                 state::AppState::Recording =>
                     "Recording...".to_string(),
                 state::AppState::Reviewing =>
-                    "Reviewing / c=confirm  x=reject t=retry p=listen again".to_string(),
+                    "Reviewing / c=confirm x=reject t=try-again p=listen again".to_string(),
             }
         };
 
@@ -196,7 +200,7 @@ fn main() {
             "s"  => app.handle_command(Command::StopRecording),
             "c"  => app.handle_command(Command::Approve),
             "x"  => app.handle_command(Command::Reject),
-            "t" => app.handle_command(Command::RetryCurrentTake),
+            "t"  => app.handle_command(Command::RetryCurrentTake),
             "pa" => app.handle_command(Command::PlayAll),
 
             // "p" is context-sensitive, during Reviewing it calls play_current_segment()
