@@ -47,7 +47,7 @@ pub struct RecorderApp {
 
 impl RecorderApp {
     pub fn new() -> Self {
-        let recorder = Arc::new(Mutex::new(RecorderState::new(44100, 1)));
+        let recorder = Arc::new(Mutex::new(RecorderState::new(48000, 1)));
         // The `on_new_data` callback will become `ctx.request_repaint` in egui.
         // For now it's a no-op so the wiring compiles without eframe.
         let on_new_data = || {};

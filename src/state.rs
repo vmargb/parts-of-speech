@@ -55,12 +55,14 @@ pub enum Command {
     Approve,
     Reject,
     RetryCurrentTake,
-    PlaySegment(usize), // 0-based index
+    PlaySegment(usize),
     PlayAll,
     RetrySegment(usize),
     InsertAfter(usize),
     DeleteSegment(usize),
     Export(String), // path
+    TrimStart(Option<usize>, f32),
+    TrimEnd(Option<usize>, f32),   // (index, seconds) - None = current
 }
 
 pub struct RecorderState {
@@ -186,6 +188,78 @@ impl RecorderState { // master struct
         }
     }
 
+    pub fn trim_start(&mut self, segment_index: Option<usize>, seconds: f32) -> bool {
+        let sample_rate = self.project.sample_rate;
+        let samples_to_trim = (seconds * sample_rate as f32) as usize;
+
+        if samples_to_trim == 0 {
+            return false;
+        }
+
+        match segment_index {
+            None => { // current segment
+                if let Some(ref mut seg) = self.current {
+                    if samples_to_trim >= seg.samples.len() {
+                        seg.samples.clear(); // Trim all if requested >= length
+                    } else {
+                        seg.samples.drain(0..samples_to_trim);
+                    }
+                    return true;
+                }
+            }
+            Some(idx) => {
+                if idx < self.project.segments.len() {
+                    let seg = &mut self.project.segments[idx];
+                    if samples_to_trim >= seg.samples.len() {
+                        seg.samples.clear();
+                    } else {
+                        seg.samples.drain(0..samples_to_trim);
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn trim_end(&mut self, segment_index: Option<usize>, seconds: f32) -> bool {
+        let sample_rate = self.project.sample_rate;
+        let samples_to_trim = (seconds * sample_rate as f32) as usize;
+
+        if samples_to_trim == 0 {
+            return false;
+        }
+
+        match segment_index {
+            None => {
+                // Trim current segment (during Reviewing)
+                if let Some(ref mut seg) = self.current {
+                    if samples_to_trim >= seg.samples.len() {
+                        seg.samples.clear();
+                    } else {
+                        let new_len = seg.samples.len() - samples_to_trim;
+                        seg.samples.truncate(new_len);
+                    }
+                    return true;
+                }
+            }
+            Some(idx) => {
+                // Trim committed segment in project
+                if idx < self.project.segments.len() {
+                    let seg = &mut self.project.segments[idx];
+                    if samples_to_trim >= seg.samples.len() {
+                        seg.samples.clear();
+                    } else {
+                        let new_len = seg.samples.len() - samples_to_trim;
+                        seg.samples.truncate(new_len);
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // *** Helpers ***
 
     #[allow(unused)]
@@ -231,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_full_workflow() {
-        let mut rec = RecorderState::new(44100, 1);
+        let mut rec = RecorderState::new(48000, 1);
 
         rec.start_recording();
         simulate_recording(&mut rec, vec![1.0, 2.0, 3.0]);
@@ -252,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_retry_logic() {
-        let mut rec = RecorderState::new(44100, 1);
+        let mut rec = RecorderState::new(48000, 1);
 
         rec.start_recording();
         simulate_recording(&mut rec, vec![1.0]);
@@ -270,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_insert_logic() {
-        let mut rec = RecorderState::new(44100, 1);
+        let mut rec = RecorderState::new(48000, 1);
 
         rec.start_recording();
         simulate_recording(&mut rec, vec![1.0]);
@@ -289,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_reject_recording() {
-        let mut rec = RecorderState::new(44100, 1);
+        let mut rec = RecorderState::new(48000, 1);
         rec.start_recording();
         simulate_recording(&mut rec, vec![1.0, 1.0, 1.0]);
         rec.stop_recording();
@@ -303,7 +377,7 @@ mod tests {
     // commands that don't involve audio I/O can be tested directly
     #[test]
     fn test_command_dispatch() {
-        let mut rec = RecorderState::new(44100, 1);
+        let mut rec = RecorderState::new(48000, 1);
 
         dispatch_command(&mut rec, Command::StartRecording);
         simulate_recording(&mut rec, vec![0.5]);
@@ -329,6 +403,8 @@ pub fn dispatch_command(rec: &mut RecorderState, cmd: Command) {
         Command::RetrySegment(i)      => { rec.retry_segment(i); }
         Command::InsertAfter(i)       => { rec.insert_segment(i); }
         Command::DeleteSegment(i)     => { rec.delete_segment(i); }
+        Command::TrimStart(idx, secs) => { rec.trim_start(idx, secs); }
+        Command::TrimEnd(idx, secs) => { rec.trim_end(idx, secs); }
         _ => {}
     }
 }
