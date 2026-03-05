@@ -2,6 +2,7 @@ mod state;
 mod audio_input;
 mod audio_output;
 mod export;
+mod gui;
 
 use std::sync::{Arc, Mutex};
 use cpal::traits::StreamTrait;
@@ -46,14 +47,11 @@ pub struct RecorderApp {
 }
 
 impl RecorderApp {
-    pub fn new() -> Self {
+    pub fn new(on_new_data: impl Fn() + Send + 'static) -> Self {
+        // run_gui passes ctx.request_repaint(), while CLI passes || {}
         let recorder = Arc::new(Mutex::new(RecorderState::new(48000, 1)));
-        // The `on_new_data` callback will become `ctx.request_repaint` in egui.
-        // For now it's a no-op so the wiring compiles without eframe.
-        let on_new_data = || {};
         let stream = audio_input::start_input_stream(recorder.clone(), on_new_data);
         stream.play().unwrap();
-
         Self { recorder, _stream: stream}
     }
 
@@ -163,16 +161,41 @@ impl RecorderApp {
     }
 }
 
-
 fn main() {
-    let app = RecorderApp::new();
+    let args: Vec<String> = std::env::args().collect();
+    let use_gui = args.iter().any(|a| a == "--gui");
+    if use_gui { run_gui(); } else { run_cli(); }
+}
 
-    println!("Commands: r  s  c  x  p <n>  pa  retry <n>  insert <n>  delete <n>  e  q  quit");
+fn run_gui() {
+}
+
+fn run_cli() {
+    let app = RecorderApp::new(|| {});
+
+    println!("Parts Of Speech — CLI mode  (run with --gui for the graphical interface)");
+    println!();
+    println!("  r          -> Record new segment");
+    println!("  s          -> Stop (auto-plays take)");
+    println!("  p          -> Listen again (reviewing) / play last segment (idle)");
+    println!("  p <n>      -> Play segment #n");
+    println!("  pa         -> Play full project");
+    println!("  c          -> Confirm  [after playback finishes]");
+    println!("  x          -> Reject   [after playback finishes]");
+    println!("  t          -> Try again (re-record same slot)");
+    println!("  retry <n>  -> Re-record segment #n");
+    println!("  insert <n> -> Insert new segment after #n");
+    println!("  delete <n> -> Delete segment #n");
+    println!("  q          -> List segments");
+    println!("  e          -> Export to output.wav and quit");
+    println!();
+    println!("  trim start|end [n] <secs> -> Trim segment");
+    println!();
 
     loop {
-        let status = {
+        let prompt = {
             let rec = app.recorder.lock().unwrap();
-            let count = rec.get_segment_count();
+            let count   = rec.get_segment_count();
             let playing = rec.playback_state == PlaybackState::Playing;
             match rec.state {
                 state::AppState::Idle if playing =>
@@ -182,11 +205,11 @@ fn main() {
                 state::AppState::Recording =>
                     "Recording...".to_string(),
                 state::AppState::Reviewing =>
-                    "Reviewing / c=confirm x=reject t=try-again p=listen again".to_string(),
+                    "Reviewing / c=confirm  x=reject  t=try-again  p=listen again".to_string(),
             }
         };
 
-        print!("{} > ", status);
+        print!("{} > ", prompt);
         use std::io::Write;
         std::io::stdout().flush().unwrap();
 
@@ -206,15 +229,15 @@ fn main() {
             // "p" is context-sensitive, during Reviewing it calls play_current_segment()
             // directly (listen again), during Idle it plays a specific or last committed segment
             "p" => {
-                // Context-sensitive: during Reviewing it means "listen again",
+                // during Reviewing it means "listen again",
                 // during Idle it plays a specific or the last committed segment.
                 let is_reviewing = matches!(
                     app.recorder.lock().unwrap().state,
                     state::AppState::Reviewing
                 );
-                if is_reviewing { // listen again during reviewing
+                if is_reviewing {
                     app.play_current_segment();
-                } else if let Some(idx_str) = parts.get(1) { // idx is passed e.g. p 2
+                } else if let Some(idx_str) = parts.get(1) {
                     if let Ok(n) = idx_str.parse::<usize>() {
                         app.handle_command(Command::PlaySegment(n - 1));
                     }
@@ -242,25 +265,65 @@ fn main() {
                     app.handle_command(Command::DeleteSegment(n - 1));
                 }
             }
+            "trim" => {
+                if parts.len() < 3 { // requires minimum 3 parts trim + pos + ...
+                    println!("Usage: trim start|end [segment_number] seconds");
+                    println!("Examples: trim start 0.5  (trim current segment)");
+                    println!("          trim end 2 0.3  (trim segment #2)");
+                    continue;
+                }
 
+                let trim_type = parts[1]; // start or end
+                let mut segment_index: Option<usize> = None;
+                let seconds_str: &str;
+
+                // could be "trim start 0.5"(current segment) or "trim start 2 0.5"
+                if parts.len() == 3 { // current segment
+                    seconds_str = parts[2];
+                } else if parts.len() == 4 { // idx passed in
+                    if let Ok(idx) = parts[2].parse::<usize>() {
+                        segment_index = Some(idx - 1); // Convert to 0-based
+                        seconds_str = parts[3];
+                    } else {
+                        println!("Invalid segment number.");
+                        continue;
+                    }
+                } else {
+                    println!("Too many arguments.");
+                    continue;
+                }
+
+                if let Ok(secs) = seconds_str.parse::<f32>() {
+                    let cmd = match trim_type { // get specific command
+                        "start" => Command::TrimStart(segment_index, secs),
+                        "end" => Command::TrimEnd(segment_index, secs),
+                        _ => {
+                            println!("Unknown trim type. Use 'start' or 'end'.");
+                            continue;
+                        }
+                    };
+                    app.handle_command(cmd);
+                } else {
+                    println!("  Invalid seconds value.");
+                }
+            }
             "q" => {
                 let rec = app.recorder.lock().unwrap();
                 if rec.project.segments.is_empty() {
-                    println!("  No segments yet.");
+                    println!("No segments yet.");
                 } else {
                     for (i, seg) in rec.project.segments.iter().enumerate() {
-                        println!("    #{} — {} samples  ({:.2}s)",
-                            i + 1, seg.samples.len(),
-                            seg.duration_seconds(rec.project.sample_rate));
+                        println!("    #{:02}  {}s  ({} samples)",
+                            i + 1,
+                            format!("{:.2}", seg.duration_seconds(rec.project.sample_rate)),
+                            seg.samples.len());
                     }
                 }
             }
-            "e" => {
-                app.handle_command(Command::Export("output.wav".into()));
-                break;
-            }
+            "e"    => { app.handle_command(Command::Export("output.wav".into())); break; }
             "quit" => break,
-            _ => println!("  Unknown command."),
+            _ => println!("Unknown command."),
         }
     }
 }
+
