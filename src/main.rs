@@ -173,35 +173,42 @@ fn run_gui() {
 
 fn run_cli() {
     let app = RecorderApp::new(|| {});
-
-    println!("{}", "=".repeat(60).cyan());
-    println!("  {} — {}", "PARTS OF SPEECH".bold().bright_white(), "CLI Mode".italic());
-    println!("{}", "  (run with --gui for the graphical interface)".dimmed());
-    println!("{}", "=".repeat(60).cyan());
-
-    println!("\n{}", "  COMMANDS".underline());
-    let commands = [
-        ("r", "Record segment", "s", "Stop & Auto-play"),
-        ("p", "Play (last/#n)", "pa", "Play full project"),
-        ("c", "Confirm take", "x", "Reject take"),
-        ("t", "Try again", "q", "List segments"),
-        ("u", "Undo", "re", "Redo"),
-    ];
-
-    for (cmd1, desc1, cmd2, desc2) in commands {
-        println!("    {:>2} {:<18} {:>6} {:<18}", 
-            cmd1.bright_green(), desc1.dimmed(), 
-            cmd2.bright_green(), desc2.dimmed()
-        );
-    }
-    println!("\n  {}  {} <secs> | {} #n", "TRIM:".dimmed(), "trim start|end".yellow(), "delete".red());
-    println!("  {}  {}", "EXIT:".dimmed(), "e (export) | quit".red());
-    println!("{}", "-".repeat(60).cyan());
+    let mut clear = true;
 
     loop {
+        // Clear the screen and move cursor to home position
+        if clear {
+            print!("\x1B[2J\x1B[H");
+            // Print header and commands
+            println!("{}", "=".repeat(60).cyan());
+            println!("  {} — {}", "PARTS OF SPEECH".bold().bright_white(), "CLI Mode".italic());
+            println!("{}", "  (run with --gui for the graphical interface)".dimmed());
+            println!("{}", "=".repeat(60).cyan());
+            println!("\n{}", "  COMMANDS".underline());
+            let commands = [
+                ("r", "Record segment", "s", "Stop & Auto-play"),
+                ("p", "Play (last/#n)", "pa", "Play full project"),
+                ("c", "Confirm take", "x", "Reject take"),
+                ("t", "Try again", "q", "List segments"),
+                ("u", "Undo", "re", "Redo"),
+            ];
+
+            for (cmd1, desc1, cmd2, desc2) in commands {
+                println!("    {:>2} {:<18} {:>6} {:<18}", 
+                    cmd1.bright_green(), desc1.dimmed(),
+                    cmd2.bright_green(), desc2.dimmed()
+                );
+            }
+            println!("\n  {}  {} <secs> | {} #n", "TRIM:".dimmed(), "trim start|end".yellow(), "delete".red());
+            println!("  {}  {}", "EXIT:".dimmed(), "e (export) | quit".red());
+            println!("{}", "-".repeat(60).cyan());
+        }
+        clear = true;
+
         let prompt = {
             let rec = app.recorder.lock().unwrap();
             let count = rec.get_segment_count();
+            let total_time = rec.total_duration();
             let playing = rec.playback_state == PlaybackState::Playing;
             
             match rec.state {
@@ -212,7 +219,7 @@ fn run_cli() {
                 state::AppState::Idle if playing => 
                     format!(" {} {} ({} segs)", "".green(), "PLAYING".green(), count),
                 state::AppState::Idle => 
-                    format!(" {} {} ({} segs)", "○".dimmed(), "IDLE".dimmed(), count),
+                    format!(" {} {} ({} segs, {})", "○".dimmed(), "IDLE".dimmed(), count, total_time),
             }
         };
 
@@ -333,13 +340,14 @@ fn run_cli() {
                     }
                     println!();
                 }
+                clear = false;
             }
             "e" => {
                 println!("{} Exporting to output.wav...", "✔".green());
                 app.handle_command(Command::Export("output.wav".into())); 
                 break; 
             }
-            "quit" => break,
+            "quit" => { print!("\x1B[2J\x1B[H"); break; }
             _ => println!("  {} Unknown command.", "×".red()),
         }
     }
