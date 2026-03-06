@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::StreamTrait;
 use state::{RecorderState, Command, dispatch_command, PlaybackState};
 use audio_output::{play_segment_async, play_project_async, ProjectSnapshot};
+use colored::*;
 
 // ** input **
 // Microphone -> audio_input.rs ->(samples only)
@@ -173,43 +174,49 @@ fn run_gui() {
 fn run_cli() {
     let app = RecorderApp::new(|| {});
 
-    println!("Parts Of Speech — CLI mode  (run with --gui for the graphical interface)");
-    println!();
-    println!("  r          -> Record new segment");
-    println!("  s          -> Stop (auto-plays take)");
-    println!("  p          -> Listen again (reviewing) / play last segment (idle)");
-    println!("  p <n>      -> Play segment #n");
-    println!("  pa         -> Play full project");
-    println!("  c          -> Confirm  [after playback finishes]");
-    println!("  x          -> Reject   [after playback finishes]");
-    println!("  t          -> Try again (re-record same slot)");
-    println!("  retry <n>  -> Re-record segment #n");
-    println!("  insert <n> -> Insert new segment after #n");
-    println!("  delete <n> -> Delete segment #n");
-    println!("  q          -> List segments");
-    println!("  e          -> Export to output.wav and quit");
-    println!();
-    println!("  trim start|end [n] <secs> -> Trim segment");
-    println!();
+    println!("{}", "=".repeat(60).cyan());
+    println!("  {} — {}", "PARTS OF SPEECH".bold().bright_white(), "CLI Mode".italic());
+    println!("{}", "  (run with --gui for the graphical interface)".dimmed());
+    println!("{}", "=".repeat(60).cyan());
+
+    println!("\n{}", "  COMMANDS".underline());
+    let commands = [
+        ("r", "Record segment", "s", "Stop & Auto-play"),
+        ("p", "Play (last/#n)", "pa", "Play full project"),
+        ("c", "Confirm take", "x", "Reject take"),
+        ("t", "Try again", "q", "List segments"),
+        ("u", "Undo", "re", "Redo"),
+    ];
+
+    for (cmd1, desc1, cmd2, desc2) in commands {
+        println!("    {:>2} {:<18} {:>6} {:<18}", 
+            cmd1.bright_green(), desc1.dimmed(), 
+            cmd2.bright_green(), desc2.dimmed()
+        );
+    }
+    println!("\n  {}  {} <secs> | {} #n", "TRIM:".dimmed(), "trim start|end".yellow(), "delete".red());
+    println!("  {}  {}", "EXIT:".dimmed(), "e (export) | quit".red());
+    println!("{}", "-".repeat(60).cyan());
 
     loop {
         let prompt = {
             let rec = app.recorder.lock().unwrap();
-            let count   = rec.get_segment_count();
+            let count = rec.get_segment_count();
             let playing = rec.playback_state == PlaybackState::Playing;
+            
             match rec.state {
-                state::AppState::Idle if playing =>
-                    format!("Playing... ({} segments)", count),
-                state::AppState::Idle =>
-                    format!("Idle ({} segments)", count),
-                state::AppState::Recording =>
-                    "Recording...".to_string(),
-                state::AppState::Reviewing =>
-                    "Reviewing / c=confirm  x=reject  t=try-again  p=listen again or trim start|end <secs>".to_string(),
+                state::AppState::Recording => 
+                    format!(" {} {} ", "●".red().blink(), "RECORDING".red().bold()),
+                state::AppState::Reviewing => 
+                    format!(" {} {} ", "▶".blue(), "REVIEWING".blue().bold()),
+                state::AppState::Idle if playing => 
+                    format!(" {} {} ({} segs)", "".green(), "PLAYING".green(), count),
+                state::AppState::Idle => 
+                    format!(" {} {} ({} segs)", "○".dimmed(), "IDLE".dimmed(), count),
             }
         };
 
-        print!("{} > ", prompt);
+        print!("{} {} ", prompt, "❯".bright_cyan());
         use std::io::Write;
         std::io::stdout().flush().unwrap();
 
@@ -224,6 +231,7 @@ fn run_cli() {
             "c"  => app.handle_command(Command::Approve),
             "x"  => app.handle_command(Command::Reject),
             "t"  => app.handle_command(Command::RetryCurrentTake),
+            "u"  => app.handle_command(Command::Undo),
             "pa" => app.handle_command(Command::PlayAll),
 
             // "p" is context-sensitive, during Reviewing it calls play_current_segment()
@@ -310,19 +318,29 @@ fn run_cli() {
             "q" => {
                 let rec = app.recorder.lock().unwrap();
                 if rec.project.segments.is_empty() {
-                    println!("No segments yet.");
+                    println!("  {}", "No segments recorded yet.".italic().dimmed());
                 } else {
+                    println!("\n  {}", "PROJECT SEGMENTS".underline());
                     for (i, seg) in rec.project.segments.iter().enumerate() {
-                        println!("    #{:02}  {}s  ({} samples)",
-                            i + 1,
-                            format!("{:.2}", seg.duration_seconds(rec.project.sample_rate)),
-                            seg.samples.len());
+                        let dur = seg.duration_seconds(rec.project.sample_rate);
+                        println!(
+                            "  {:>2}. [{}] {:>5.2}s  {}", 
+                            (i + 1).to_string().bright_white(),
+                            "■".repeat((dur as usize).min(10)).green(), // simple "sparkline"
+                            dur,
+                            format!("({} samples)", seg.samples.len()).dimmed()
+                        );
                     }
+                    println!();
                 }
             }
-            "e"    => { app.handle_command(Command::Export("output.wav".into())); break; }
+            "e" => {
+                println!("{} Exporting to output.wav...", "✔".green());
+                app.handle_command(Command::Export("output.wav".into())); 
+                break; 
+            }
             "quit" => break,
-            _ => println!("Unknown command."),
+            _ => println!("  {} Unknown command.", "×".red()),
         }
     }
 }
