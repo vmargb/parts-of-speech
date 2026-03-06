@@ -39,20 +39,21 @@ cargo run
 
 ## Command Summary
 
-| Key / Command   | Action       | Description                                       |
-| -------------   | ------------ | ------------------------------------------------- |
-| `r`             | Record       | Record a new segment                              |
-| `s`             | Stop         | Stop recording to review the segment.             |
-| `c`             | Confirm      | Approve the current segment.                      |
-| `x`             | Reject       | Reject the current segment.                       |
-| `t`             | Try again    | Reject the current segment and try again          |
-| `p`             | Play         | Play the last recorded segment.                   |
-| `p <n>`         | Play segment | Play segment number n.                            |
-| `pa`            | Play all     | Play all segments in sequence (the full project). |
-| `retry <n>`     | Retry        | Re-record segment number n.                       |
-| `delete <n>`    | Delete       | Delete segment number n.                          |
-| `insert <n>`    | Insert       | Insert a new segment after position n.            |
-| `e`             | Export       | Export all confirmed segments and exit.           |
+| Key / Command    | Action       | Description                                       |
+| -------------    | ------------ | ------------------------------------------------- |
+| `r`              | Record       | Record a new segment                              |
+| `s`              | Stop         | Stop recording to review the segment.             |
+| `c`              | Confirm      | Approve the current segment.                      |
+| `x`              | Reject       | Reject the current segment.                       |
+| `t`              | Try again    | Reject the current segment and try again          |
+| `p`              | Play         | Play the last recorded segment.                   |
+| `p <n>`          | Play segment | Play segment number n.                            |
+| `pa`             | Play all     | Play all segments in sequence (the full project). |
+| `retry <n>`      | Retry        | Re-record segment number n.                       |
+| `delete <n>`     | Delete       | Delete segment number n.                          |
+| `insert <n>`     | Insert       | Insert a new segment after position n.            |
+| `trim s/e <secs>`| Trim         | Trims the start and end of the segment by <secs>. |
+| `e`              | Export       | Export all confirmed segments and exit.           |
 
 
 ### Workflow
@@ -80,11 +81,3 @@ cargo run
 
 7. **Export:**
    - Once you are satisfied with all segments, use the `e` command to export all confirmed segments and exit the application.
-
----
-
-## Proposals
-- **GUI with Clickable/Moveable Segments**:
-  - Implement a graphical user interface to click on and move segments for easier editing.
-- **Trim Audio Segments**:
-  - Add functionality to trim the start and end of audio segments to remove unwanted parts.

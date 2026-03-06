@@ -76,8 +76,7 @@ pub fn play_project_async(
             return;
         }
 
-        let channels = NonZeroU16::new(project_snapshot.channels)
-            .expect("Invalid channel count");
+        let channels = NonZeroU16::new(1).unwrap(); // force mono like play_segment_async
         let rate = NonZeroU32::new(project_snapshot.sample_rate)
             .expect("Invalid sample rate");
 
@@ -100,7 +99,7 @@ pub fn play_project_async(
 pub struct ProjectSnapshot {
     pub segments: Vec<Vec<f32>>,
     pub sample_rate: u32,
-    pub channels: u16,
+    // channels always mono so not needed
 }
 
 impl ProjectSnapshot {
@@ -108,8 +107,6 @@ impl ProjectSnapshot {
         Self {
             segments: project.segments.iter().map(|s| s.samples.clone()).collect(),
             sample_rate: project.sample_rate,
-            channels: project.channels,
         }
     }
 }
-

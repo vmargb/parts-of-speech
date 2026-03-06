@@ -65,12 +65,17 @@ pub enum Command {
     TrimEnd(Option<usize>, f32),   // (index, seconds) - None = current
 }
 
+const MAX_HISTORY: usize = 5;
+
 pub struct RecorderState {
     pub state: AppState,
     pub current: Option<Segment>, // current chunk being recorded/reviewed
     pub project: Project, // all chunks
     pub is_insertion: bool, // helps decide between replace vs insert
     pub playback_state: PlaybackState,
+    // project history
+    pub history: Vec<Project>, // stack of previous project states
+    pub previous_current: Option<Segment>, // backup for uncommitted segment
 }
 
 // holds the the current segment being recorded, the state
@@ -88,6 +93,8 @@ impl RecorderState { // master struct
                 channels,
                 editing_index: None,
             },
+            history: Vec::new(),
+            previous_current: None,
         }
     }
 

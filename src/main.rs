@@ -205,7 +205,7 @@ fn run_cli() {
                 state::AppState::Recording =>
                     "Recording...".to_string(),
                 state::AppState::Reviewing =>
-                    "Reviewing / c=confirm  x=reject  t=try-again  p=listen again".to_string(),
+                    "Reviewing / c=confirm  x=reject  t=try-again  p=listen again or trim start|end <secs>".to_string(),
             }
         };
 
