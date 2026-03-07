@@ -66,9 +66,8 @@ pub enum Command {
     TrimStart(Option<usize>, f32),
     TrimEnd(Option<usize>, f32),   // (index, seconds) - None = current
     Undo,
+    Redo,
 }
-
-const MAX_HISTORY: usize = 5;
 
 pub struct RecorderState {
     pub state: AppState,
@@ -78,8 +77,10 @@ pub struct RecorderState {
     pub playback_state: PlaybackState,
     // project history
     // automatically triggered by edit methods
-    pub history: Vec<Project>, // stack of previous versions of the project
-    pub previous_current: Option<Segment>, // backup for uncommitted segment (one-step undo)
+    pub history: Vec<Project>, // backup for commited segments
+    pub history_index: usize, // current position in history
+    pub previous_current: Option<Segment>, // backup for uncommitted segment
+    pub next_current: Option<Segment>, // redo backup for uncommitted segment
 }
 
 // holds the the current segment being recorded, the state
@@ -98,23 +99,39 @@ impl RecorderState { // master struct
                 editing_index: None,
             },
             history: Vec::new(),
+            history_index: 0,
             previous_current: None,
+            next_current: None,
         }
     }
 
     // *** Project History
 
-    // save current project state to history
-    fn push_project_history(&mut self) {
-        self.history.push(self.project.clone());
-        // limit size to prevent memory overflow
-        if self.history.len() > MAX_HISTORY {
-            self.history.remove(0); // remove oldest copy
+    // save current project state to history (call BEFORE modifying)
+    fn save_state(&mut self) {
+        // truncate history beyond current index (discard redo branch)
+        // check if history is non-empty before subtracting to prevent usize underflow
+        if !self.history.is_empty() && self.history_index < self.history.len() - 1 {
+            self.history.truncate(self.history_index + 1);
         }
+        // clone and push current project state
+        self.history.push(self.project.clone());
+        self.history_index = self.history.len() - 1;
+        
+        const MAX_HISTORY: usize = 5; // limit history size
+        if self.history.len() > MAX_HISTORY {
+            self.history.remove(0); // remove oldest
+            if self.history_index > 0 {
+                self.history_index -= 1; // reposition one back
+            }
+        }
+        
+        self.next_current = None; // clear redo backup for current segment
     }
 
-    // save the current uncommitted segment to backup
+    // save the current uncommitted segment to backup (call BEFORE modifying)
     fn push_current_backup(&mut self) {
+        self.next_current = None; // clear redo backup when state is changed
         if let Some(seg) = &self.current {
             self.previous_current = Some(seg.clone());
         }
@@ -124,19 +141,43 @@ impl RecorderState { // master struct
     // if there's an uncommited backup segment, switch it
     // if there's a previous project copy, switch to it
     pub fn undo(&mut self) -> bool {
-        // restore uncommitted segment (e.g. trim during Reviewing)
+        // case 1: undo uncommitted segment (e.g. trim during Reviewing)
         if let Some(prev) = self.previous_current.take() {
+            if let Some(curr) = &self.current {
+                self.next_current = Some(curr.clone());
+            }
             self.current = Some(prev);
             return true;
         }
 
-        // restore project state (trim/delete/insert on committed segments)
-        if let Some(prev_project) = self.history.pop() {
-            self.project = prev_project;
+        // case 2: undo project state
+        if self.history_index > 0 {
+            self.history_index -= 1;
+            self.project = self.history[self.history_index].clone();
             return true;
         }
 
-        false // nothing to undo
+        false
+    }
+
+    pub fn redo(&mut self) -> bool {
+        // case 1: redo uncommitted segment
+        if let Some(next) = self.next_current.take() {
+            if let Some(curr) = &self.current {
+                self.previous_current = Some(curr.clone());
+            }
+            self.current = Some(next);
+            return true;
+        }
+
+        // case 2: redo project state
+        if self.history_index < self.history.len() - 1 {
+            self.history_index += 1;
+            self.project = self.history[self.history_index].clone();
+            return true;
+        }
+
+        false
     }
 
     // *** Workflow Methods ***
@@ -147,6 +188,9 @@ impl RecorderState { // master struct
         self.is_insertion = false; // append not insert
         self.current = Some(Segment { samples: Vec::new() });
         self.project.editing_index = None; // None: segment at end default
+        // starting a new take invalidates old undo history for the previous take
+        self.previous_current = None;
+        self.next_current = None;
     }
 
     pub fn stop_recording(&mut self) {
@@ -173,6 +217,9 @@ impl RecorderState { // master struct
         }
         self.state = AppState::Idle;
         self.is_insertion = false;
+        // once approved, clear current-segment undo buffers when lifecycle ends
+        self.previous_current = None;
+        self.next_current = None;
     }
     // retry can provide an idx number, which is held in struct
     // so approve accounts for both cases
@@ -181,6 +228,9 @@ impl RecorderState { // master struct
         self.current = None; // delete current segment
         self.project.editing_index = None;
         self.state = AppState::Idle;
+        // once rejected, clear current-segment undo buffers
+        self.previous_current = None;
+        self.next_current = None;
     }
 
     // retry the take that was just recorded
@@ -255,7 +305,7 @@ impl RecorderState { // master struct
                 }
             }
             Some(idx) => {
-                self.push_project_history(); // save backup
+                self.save_state(); // save backup (not current segment so save state)
                 if idx < self.project.segments.len() {
                     let seg = &mut self.project.segments[idx];
                     if samples_to_trim >= seg.samples.len() {
@@ -292,7 +342,7 @@ impl RecorderState { // master struct
             }
             Some(idx) => {
                 // Trim committed segment in project
-                self.push_current_backup(); // save backup
+                self.save_state(); // save backup
                 if idx < self.project.segments.len() {
                     let seg = &mut self.project.segments[idx];
                     if samples_to_trim >= seg.samples.len() {
@@ -310,12 +360,14 @@ impl RecorderState { // master struct
 
     // *** Helpers ***
 
-    #[allow(unused)]
-    pub fn total_duration(&self) -> f32 {
-        self.project.segments
+    pub fn total_duration(&self) -> String {
+        let total_secs: f32 = self.project.segments
             .iter()
             .map(|seg| seg.duration_seconds(self.project.sample_rate))
-            .sum()
+            .sum();
+        let mins = (total_secs / 60.0) as u32;
+        let secs = (total_secs % 60.0) as u32;
+        format!("{}m:{:02}s", mins, secs)
     }
 
     pub fn get_segment(&self, index: usize) -> Option<&Segment> {
@@ -445,15 +497,16 @@ pub fn dispatch_command(rec: &mut RecorderState, cmd: Command) {
     match cmd {
         Command::StartRecording       => rec.start_recording(),
         Command::StopRecording        => rec.stop_recording(),
-        Command::Approve              => { rec.push_project_history(); rec.approve(); }
+        Command::Approve              => { rec.approve(); rec.save_state(); }
         Command::Reject               => rec.reject(),
         Command::RetryCurrentTake     => rec.retry_current_take(), // saved in prev_current
-        Command::RetrySegment(i)      => { rec.push_project_history(); rec.retry_segment(i); }
-        Command::InsertAfter(i)       => { rec.push_project_history(); rec.insert_segment(i); }
-        Command::DeleteSegment(i)     => { rec.push_project_history(); rec.delete_segment(i); }
+        Command::RetrySegment(i)      => { rec.retry_segment(i); rec.save_state(); }
+        Command::InsertAfter(i)       => { rec.insert_segment(i); rec.save_state(); }
+        Command::DeleteSegment(i)     => { rec.delete_segment(i); rec.save_state(); }
         Command::TrimStart(idx, secs) => { rec.trim_start(idx, secs); } // saved in prev_current
-        Command::TrimEnd(idx, secs) => { rec.trim_end(idx, secs); }
+        Command::TrimEnd(idx, secs)   => { rec.trim_end(idx, secs); }
         Command::Undo                 => { rec.undo(); }
+        Command::Redo                 => { rec.redo(); }
         _ => {}
     }
 }

@@ -190,7 +190,7 @@ fn run_cli() {
                 ("p", "Play (last/#n)", "pa", "Play full project"),
                 ("c", "Confirm take", "x", "Reject take"),
                 ("t", "Try again", "q", "List segments"),
-                ("u", "Undo", "re", "Redo"),
+                ("u", "Undo", "z", "Redo"),
             ];
 
             for (cmd1, desc1, cmd2, desc2) in commands {
@@ -239,6 +239,7 @@ fn run_cli() {
             "x"  => app.handle_command(Command::Reject),
             "t"  => app.handle_command(Command::RetryCurrentTake),
             "u"  => app.handle_command(Command::Undo),
+            "z"  => app.handle_command(Command::Redo),
             "pa" => app.handle_command(Command::PlayAll),
 
             // "p" is context-sensitive, during Reviewing it calls play_current_segment()
