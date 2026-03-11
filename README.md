@@ -57,8 +57,6 @@ cargo run
 | `trim s/e <secs>`| Trim         | Trims the start and end of the segment by <secs>. |
 | `e`              | Export       | Export all confirmed segments and exit.           |
 
-![Command Keybindings](screenshots/keybindings.png)
-
 
 ### Workflow
 
