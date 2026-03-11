@@ -271,16 +271,17 @@ impl RecorderApp {
                 .map(|(i, s)| (i, s.samples.len(), s.duration_seconds(sr)))
                 .collect();
             (rec.get_segment_count(), ip, ii, td, meta)
-        }; // <-  mutex released here, drawing happens with no lock held
+        }; //  mutex released here, drawing happens with no lock held
+
         ui.horizontal(|ui| {
-            ui.label(RichText::new("SEGMENTS").font(FontId::monospace(9.0)).color(DIM).strong());
+            ui.label(RichText::new("SEGMENTS ").font(FontId::monospace(9.0)).color(DIM).strong());
             if seg_count > 0 {
                 ui.add_space(6.0);
-                ui.label(RichText::new(format!("{}", seg_count)).font(FontId::monospace(9.0)).color(MONO));
+                ui.label(RichText::new(format!("{} ", seg_count)).font(FontId::monospace(9.0)).color(MONO));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let m = (total_dur / 60.0) as u32;
                     let s = (total_dur % 60.0) as u32;
-                    ui.label(RichText::new(format!("{:02}:{:02} total", m, s))
+                    ui.label(RichText::new(format!("{:02}:{:02} total ", m, s))
                         .font(FontId::monospace(9.0)).color(DIM));
                 });
             }
@@ -294,15 +295,21 @@ impl RecorderApp {
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("no segments yet  --  press RECORD to begin")
+                        ui.label(RichText::new("no segments yet  --  press RECORD to begin ")
                             .font(FontId::monospace(10.0)).color(Color32::from_rgb(44, 44, 62)));
                     });
                 });
             return;
         }
 
+        // Calculate available height for the scroll area
+        // Reserve space for: header (≈30px) + footer (≈40px) + spacing (≈20px)
+        let available_height = ui.available_height();
+        let reserved_height = 90.0; // Space for footer and spacing
+        let scroll_height = (available_height - reserved_height).max(100.0);
+
         egui::ScrollArea::vertical()
-            .max_height(220.0)
+            .max_height(scroll_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for (idx, n, dur) in &meta {
