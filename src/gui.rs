@@ -470,24 +470,76 @@ impl RecorderApp {
 
     // -- footer ----------------------------------------------------------------
     fn draw_footer(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let (seg_count, is_idle, is_playing) = {
+        let (seg_count, is_idle, is_playing, current_save_path) = {
             let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
-            (rec.get_segment_count(), matches!(rec.state, AppState::Idle),
-             rec.playback_state == PlaybackState::Playing)
+            (
+                rec.get_segment_count(),
+                matches!(rec.state, AppState::Idle),
+                rec.playback_state == PlaybackState::Playing,
+                rec.save_path.clone() 
+            )
         };
+
         ui.horizontal(|ui| {
-            let can_export = seg_count > 0 && is_idle && !is_playing;
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(136.0, 30.0),
-                if can_export { Sense::click() } else { Sense::hover() });
-            let hov = resp.hovered() && can_export;
-            ui.painter().rect(rect, Rounding::same(6.0), SURF2,
-                Stroke::new(1.0, if hov { TEXT } else { BORDER }));
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER,
-                "EXPORT WAV", FontId::monospace(9.5), if can_export { TEXT } else { MUTED });
-            if resp.clicked() && can_export {
-                ctx.request_repaint();
-                self.handle_command(Command::Export("output.wav".into()));
+            let can_interact = is_idle && !is_playing;
+            let can_export = seg_count > 0 && can_interact;
+
+            // pass ui as an argument so the closure doesn't capture and lock it
+            let footer_btn = |ui: &mut egui::Ui, label: &str, enabled: bool, width: f32| -> bool {
+                let (rect, resp) = ui.allocate_exact_size(
+                    Vec2::new(width, 30.0),
+                    if enabled { Sense::click() } else { Sense::hover() }
+                );
+                let hov = resp.hovered() && enabled;
+                ui.painter().rect(
+                    rect, Rounding::same(6.0), SURF2,
+                    Stroke::new(1.0, if hov { TEXT } else { BORDER })
+                );
+                ui.painter().text(
+                    rect.center(), egui::Align2::CENTER_CENTER, label,
+                    FontId::monospace(9.5), if enabled { TEXT } else { MUTED }
+                );
+                resp.clicked() && enabled
+            };
+
+            // pass ui as the first argument to every call
+            if footer_btn(ui, "LOAD PROJECT", can_interact, 120.0) {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Project File", &["bin"])
+                    .pick_file()
+                {
+                    self.handle_command(Command::LoadProject(path.to_string_lossy().to_string()));
+                    ctx.request_repaint();
+                }
             }
+            ui.add_space(8.0);
+
+            if footer_btn(ui, "SAVE AS...", can_interact, 100.0) {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Project File", &["bin"])
+                    .save_file()
+                {
+                    self.handle_command(Command::SaveProjectAs(path.to_string_lossy().to_string()));
+                    ctx.request_repaint();
+                }
+            }
+            ui.add_space(8.0);
+
+            if footer_btn(ui, "EXPORT WAV", can_export, 110.0) {
+                let mut dialog = rfd::FileDialog::new().add_filter("WAV Audio", &["wav"]);
+
+                if let Some(p) = current_save_path {
+                    if let Some(parent) = std::path::Path::new(&p).parent() {
+                        dialog = dialog.set_directory(parent);
+                    }
+                }
+
+                if let Some(path) = dialog.save_file() {
+                    self.handle_command(Command::Export(Some(path.to_string_lossy().to_string())));
+                    ctx.request_repaint();
+                }
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new("? for keybindings")
                     .font(FontId::monospace(8.0)).color(Color32::from_rgb(38, 38, 56)));

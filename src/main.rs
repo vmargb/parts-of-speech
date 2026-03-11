@@ -153,15 +153,26 @@ impl RecorderApp {
 
             Command::Export(custom_path) => {
                 let rec = self.recorder.lock().unwrap();
-                // determine the export path
-                let path = custom_path.unwrap_or_else(|| {
-                    rec.save_path.as_ref()
-                        Smap(|p| p.replace(".bin", ".wav")) // swap extension
-                        .unwrap_or_else(|| "output.wav".into()) // fallback
-                });
-
+                // Use the provided path, or fallback to output.wav
+                let path = custom_path.unwrap_or_else(|| "output.wav".into());
                 export::export_wav(&rec.project, &path);
                 println!("Exported to {}", path);
+            }
+
+            Command::SaveProjectAs(path) => {
+                let mut rec = self.recorder.lock().unwrap();
+                rec.set_save_path(path.clone()); // Remember where we saved it
+                rec.save_to_disk();
+                println!("Project saved to {}", path);
+            }
+
+            Command::LoadProject(path) => {
+                let mut rec = self.recorder.lock().unwrap();
+                if let Err(e) = rec.load_from_disk(path.clone()) {
+                    eprintln!("Failed to load project: {}", e);
+                } else {
+                    println!("Project loaded successfully from {}", path);
+                }
             }
 
             // All other commands change state.rs which are delegated to dispatch_command
@@ -376,7 +387,7 @@ fn run_cli() {
             }
             "e" => {
                 println!("{} Exporting to output.wav...", "✔".green());
-                app.handle_command(Command::Export("output.wav".into())); 
+                app.handle_command(Command::Export(Some("output.wav".into()))); 
                 break; 
             }
             "quit" => { print!("\x1B[2J\x1B[H"); break; }

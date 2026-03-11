@@ -64,7 +64,6 @@ pub enum Command {
     RetrySegment(usize),
     InsertAfter(usize),
     DeleteSegment(usize),
-    Export(String), // path
     TrimStart(Option<usize>, f32),
     TrimEnd(Option<usize>, f32),   // (index, seconds) - None = current
     Undo,
@@ -86,6 +85,7 @@ pub struct RecorderState {
     pub history_index: usize, // current position in history
     pub previous_current: Option<Segment>, // backup for uncommitted segment
     pub next_current: Option<Segment>, // redo backup for uncommitted segment
+    pub save_path: Option<String>, // where the project is saved
 }
 
 // holds the the current segment being recorded, the state
@@ -110,6 +110,7 @@ impl RecorderState { // master struct
             history_index: 0,
             previous_current: None,
             next_current: None,
+            save_path: None,
         }
     }
 

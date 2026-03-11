@@ -36,6 +36,7 @@ git clone https://github.com/vmargb/parts-of-speech.git
 cd parts-of-speech
 cargo run
 ```
+and `cargo run -- --gui` for the GUI version.
 
 ---
 
