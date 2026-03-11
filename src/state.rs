@@ -1,10 +1,12 @@
+use serde::{Serialize, Deserialize};
+
 // This module is the data model that holds audio
 // segments linearly. Nothing outside of this module
 // is allowed to mutate segments directly
 
 // ===== Data =====
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Segment { // a single recording take
     // the actual audio numbers
     pub samples: Vec<f32>, // raw audio data (32-bit float samples)
@@ -21,7 +23,7 @@ impl Segment {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Project {
     pub segments: Vec<Segment>, // ALL chunks in order
     pub sample_rate: u32, // 44100 or 48000 Hz
@@ -67,6 +69,9 @@ pub enum Command {
     TrimEnd(Option<usize>, f32),   // (index, seconds) - None = current
     Undo,
     Redo,
+    Export(Option<String>), // None = use auto-path, Some = use explicit path
+    LoadProject(String),
+    SaveProjectAs(String),
 }
 
 pub struct RecorderState {
@@ -107,8 +112,14 @@ impl RecorderState { // master struct
             next_current: None,
         }
     }
-    // *** Project History
 
+    // --Save & Load Functionality ---------------------------------
+
+    pub fn set_save_path(&mut self, path: String) {
+        self.save_path = Some(path);
+    }
+
+    // *** Project History
     // save current project state to history (call BEFORE modifying)
     fn save_state(&mut self) {
         // truncate history beyond current index (discard redo branch)
@@ -129,6 +140,31 @@ impl RecorderState { // master struct
         }
         
         self.next_current = None; // clear redo backup for current segment
+        self.save_to_disk(); // trigger auto-save to disk
+    }
+
+    pub fn save_to_disk(&self) {
+        if let Some(path) = &self.save_path {
+            if let Ok(encoded) = bincode::serialize(&self.project) {
+                let _ = std::fs::write(path, encoded);
+            }
+        }
+    }
+
+    pub fn load_from_disk(&mut self, path: String) -> Result<(), Box<dyn std::error::Error>> {
+        let data = std::fs::read(&path)?;
+        let project: Project = bincode::deserialize(&data)?;
+        
+        self.project = project.clone();
+        self.save_path = Some(path);
+        
+        // reset history on load
+        self.history = vec![project];
+        self.history_index = 0;
+        self.previous_current = None;
+        self.next_current = None;
+        
+        Ok(())
     }
 
     // save the current uncommitted segment to backup (call BEFORE modifying)
@@ -386,7 +422,6 @@ impl RecorderState { // master struct
         matches!(self.state, AppState::Recording)
             || self.playback_state == PlaybackState::Playing // PartialEq
     }
-
 }
 // write logic for RecorderState without audio
 // unit test the entire workflow without needing audio

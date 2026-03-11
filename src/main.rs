@@ -151,8 +151,15 @@ impl RecorderApp {
                 play_project_async(snapshot, self.recorder.clone(), || {});
             }
 
-            Command::Export(path) => {
+            Command::Export(custom_path) => {
                 let rec = self.recorder.lock().unwrap();
+                // determine the export path
+                let path = custom_path.unwrap_or_else(|| {
+                    rec.save_path.as_ref()
+                        Smap(|p| p.replace(".bin", ".wav")) // swap extension
+                        .unwrap_or_else(|| "output.wav".into()) // fallback
+                });
+
                 export::export_wav(&rec.project, &path);
                 println!("Exported to {}", path);
             }
