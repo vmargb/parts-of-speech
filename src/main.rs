@@ -43,8 +43,12 @@ use colored::*;
 // `_stream` field name starts with `_` so Rust knows the drop is
 // intentional (not a bug) and won't emit an unused-variable warning.
 pub struct RecorderApp {
-    recorder: Arc<Mutex<RecorderState>>,
-    _stream: cpal::Stream, // keep alive for the entire app lifetime
+    pub recorder:          Arc<Mutex<RecorderState>>,
+    pub _stream:           cpal::Stream,
+    // GUI state, not visible to audio threads
+    pub selected_segment:  Option<usize>,
+    pub trim_amount:       f32,
+    pub show_keybindings:  bool,
 }
 
 impl RecorderApp {
@@ -53,7 +57,13 @@ impl RecorderApp {
         let recorder = Arc::new(Mutex::new(RecorderState::new(48000, 1)));
         let stream = audio_input::start_input_stream(recorder.clone(), on_new_data);
         stream.play().unwrap();
-        Self { recorder, _stream: stream}
+        Self {
+            recorder,
+            _stream: stream,
+            selected_segment: None,
+            trim_amount:      0.10,
+            show_keybindings: false,
+        }
     }
 
     // rec.current which is the pending take that hasn't been approved yet, this is 
@@ -66,8 +76,7 @@ impl RecorderApp {
             let seg_clone = seg.clone();
             let sample_rate = rec.project.sample_rate;
             drop(rec);
-            let on_done = || {};
-            play_segment_async(seg_clone, sample_rate, self.recorder.clone(), on_done);
+            play_segment_async(seg_clone, sample_rate, self.recorder.clone(), || {});
         }
     }
 
@@ -110,7 +119,7 @@ impl RecorderApp {
             Command::RetryCurrentTake => {
                 let rec = self.recorder.lock().unwrap();
                 if rec.playback_state == PlaybackState::Playing {
-                    println!( "Wait for playback to finish before retrying. ");
+                    println!("Wait for playback to finish before retrying.");
                     return;
                 }
                 drop(rec);
@@ -128,9 +137,7 @@ impl RecorderApp {
                     let seg_clone = seg.clone();
                     let sample_rate = rec.project.sample_rate;
                     drop(rec);
-
-                    let on_done = || {};
-                    play_segment_async(seg_clone, sample_rate, self.recorder.clone(), on_done);
+                    play_segment_async(seg_clone, sample_rate, self.recorder.clone(), || {});
                 }
             }
 
@@ -141,9 +148,7 @@ impl RecorderApp {
 
                 let snapshot = ProjectSnapshot::from_project(&rec.project);
                 drop(rec);
-
-                let on_done = || {};
-                play_project_async(snapshot, self.recorder.clone(), on_done);
+                play_project_async(snapshot, self.recorder.clone(), || {});
             }
 
             Command::Export(path) => {
@@ -169,6 +174,25 @@ fn main() {
 }
 
 fn run_gui() {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Parts Of Speech")
+            .with_inner_size([800.0, 600.0])
+            .with_min_inner_size([640.0, 500.0])
+            .with_resizable(true),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Parts Of Speech",
+        options,
+        Box::new(|cc| {
+            let ctx = cc.egui_ctx.clone();
+            let on_new_data = move || ctx.request_repaint();
+            let app = RecorderApp::new(on_new_data);
+            Ok(Box::new(app))
+        }),
+    ).expect("Failed to launch GUI");
 }
 
 fn run_cli() {
@@ -186,11 +210,11 @@ fn run_cli() {
             println!("{}", "=".repeat(60).cyan());
             println!("\n{}", "  COMMANDS".underline());
             let commands = [
-                ("r", "Record segment", "s", "Stop & Auto-play"),
-                ("p", "Play (last/#n)", "pa", "Play full project"),
-                ("c", "Confirm take", "x", "Reject take"),
-                ("t", "Try again", "q", "List segments"),
-                ("u", "Undo", "z", "Redo"),
+                ("r",  "Record segment",   "s",  "Stop & Auto-play"),
+                ("p",  "Play (last/#n)",   "pa", "Play full project"),
+                ("c",  "Confirm take",     "x",  "Reject take"),
+                ("t",  "Try again",        "q",  "List segments"),
+                ("u",  "Undo",             "z",  "Redo"),
             ];
 
             for (cmd1, desc1, cmd2, desc2) in commands {
@@ -320,7 +344,7 @@ fn run_cli() {
                     };
                     app.handle_command(cmd);
                 } else {
-                    println!("  Invalid seconds value.");
+                    println!("Invalid seconds value.");
                 }
             }
             "q" => {

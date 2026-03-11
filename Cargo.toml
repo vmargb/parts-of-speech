@@ -1,6 +1,6 @@
 [package]
 name = "parts-of-speech"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -8,3 +8,5 @@ colored = "3.1.1"
 cpal = "0.17.3"
 hound = "3.5.1"
 rodio = "0.22.1"
+eframe = "0.29"
+egui = "0.29"

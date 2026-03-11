@@ -16,8 +16,8 @@ pub fn start_input_stream(
     
     // get hardware config
     let config = device.default_input_config().expect("Failed to get default input config");
-    let hardware_sample_rate = config.sample_rate();
-    let hardware_channels = config.channels();
+    let hardware_sample_rate = config.sample_rate(); // cpal::SampleRate
+    let hardware_channels = config.channels(); // u16
 
     // sync RecorderState to hardware settings to avoid mismatch
     // e.g. mic set to 48000Hz in OS settings, but RecorderState 44100
@@ -41,7 +41,7 @@ pub fn start_input_stream(
                             // Stereo (or more), down-mix to Mono
                             // .chunks_exact(2) gives [[L, R], [L, R], ...] so L + R / 2
                             let mono_data = data //.into() converts u16 into usize
-                                .chunks_exact(hardware_channels.into())
+                                .chunks_exact(hardware_channels as usize)
                                 .map(|frame| frame.iter().sum::<f32>() / hardware_channels as f32);
                             seg.samples.extend(mono_data);
                         }
