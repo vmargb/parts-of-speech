@@ -20,29 +20,12 @@ const TEXT:   Color32 = Color32::from_rgb(237, 236, 233);
 const DIM:    Color32 = Color32::from_rgb(100, 98,  120);
 const MONO:   Color32 = Color32::from_rgb(148, 226, 199);
 
-// const BG:     Color32 = Color32::from_rgb(247, 231, 197); // warm dawn / cream
-// const SURF:   Color32 = Color32::from_rgb(213, 211, 199); // concrete
-// const SURF2:  Color32 = Color32::from_rgb(206, 210, 215); // warm steel base
-// const SURF3:  Color32 = Color32::from_rgb(141, 145, 141); // deeper warm steel / concrete blend
-// const BORDER: Color32 = Color32::from_rgb(152, 102, 104); // soft rosewood edge
-// const BORDBR: Color32 = Color32::from_rgb(98,  27,  33);  // strong rosewood
-
-// const REC:    Color32 = Color32::from_rgb(244, 163, 132); // peach accent
-// const PLAY:   Color32 = Color32::from_rgb(160, 215, 188); // dawn-sky teal/green mix
-// const AMBER:  Color32 = Color32::from_rgb(255, 204, 153); // peaches & cream highlight
-// const BLUE:   Color32 = Color32::from_rgb(137, 184, 225); // dawn sky blue
-
-// const MUTED:  Color32 = Color32::from_rgb(178, 185, 181); // muted warm concrete
-// const TEXT:   Color32 = Color32::from_rgb(62,  45,  43);  // dark cocoa/rosewood for contrast
-// const DIM:    Color32 = Color32::from_rgb(120, 102,  95); // soft dim rosewood/peach
-// const MONO:   Color32 = Color32::from_rgb(195, 225, 210); // light mono mint (dawn + steel mix)
-
 
 // -- eframe::App ---------------------------------------------------------------
 impl eframe::App for RecorderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         {
-            let rec = self.recorder.lock().unwrap();
+            let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(rec.state, AppState::Recording)
                 || rec.playback_state == PlaybackState::Playing
             {
@@ -127,8 +110,12 @@ impl RecorderApp {
     }
 
     fn draw_status_badge(&self, ui: &mut egui::Ui) {
-        let rec = self.recorder.lock().unwrap();
+        // read time BEFORE locking the recorder. ui.input() internally
+        // acquires egui's context read-lock; holding our recorder mutex
+        // at the same time creates a lock-ordering inversion with egui's
+        // repaint machinery and causes intermittent deadlocks.
         let t = ui.input(|i| i.time) as f32;
+        let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
         let (text, col) = match (&rec.state, &rec.playback_state) {
             (AppState::Recording, _)    => ("REC",    REC),
             (_, PlaybackState::Playing) => ("PLAY",   PLAY),
@@ -145,7 +132,7 @@ impl RecorderApp {
     // -- Transport Card --------------------------------------------------------
     fn draw_transport_card(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (state_str, is_playing, seg_count, cur_samples, sample_rate, can_undo, can_redo) = {
-            let rec = self.recorder.lock().unwrap();
+            let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
             let s = match &rec.state {
                 AppState::Idle      => "idle",
                 AppState::Recording => "recording",
@@ -274,27 +261,17 @@ impl RecorderApp {
 
     // -- Segment list ----------------------------------------------------------
     fn draw_segment_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        // 1: hold the lock as briefly as possible
-        // only read scalar metadata + sample-count signatures. but do not compute
-        // waveforms under the lock — compute_waveform() holds the lock for
-        // several milliseconds per segment, causing the audio input callback's
-        // try_lock() to fail and drop samples (audible as static).
-        let (seg_count, is_playing, is_idle, total_dur, meta, _) = {
-            let rec = self.recorder.lock().unwrap();
+        let (seg_count, is_playing, is_idle, total_dur, meta) = {
+            let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
             let sr  = rec.project.sample_rate;
             let ip  = rec.playback_state == PlaybackState::Playing;
             let ii  = matches!(rec.state, AppState::Idle);
             let td: f32 = rec.project.segments.iter().map(|s| s.duration_seconds(sr)).sum();
-
-            // Scalar metadata — no heavy work
             let meta: Vec<(usize, usize, f32)> = rec.project.segments.iter().enumerate()
                 .map(|(i, s)| (i, s.samples.len(), s.duration_seconds(sr)))
                 .collect();
-
-            (rec.get_segment_count(), ip, ii, td, meta, ())
-        }; // mutex released here
-
-        // -- 2: draw ------------------------------------------------------
+            (rec.get_segment_count(), ip, ii, td, meta)
+        }; // <-  mutex released here, drawing happens with no lock held
         ui.horizontal(|ui| {
             ui.label(RichText::new("SEGMENTS").font(FontId::monospace(9.0)).color(DIM).strong());
             if seg_count > 0 {
@@ -342,6 +319,11 @@ impl RecorderApp {
     // layout cursor), then ui.interact(sub_rect, unique_id, sense) for every
     // interactive element. ui.interact does not advance the layout cursor, so
     // multiple sub-regions can coexist without fighting over the same space.
+    //
+    // Info zone (left side) and action buttons (right side) are given
+    // non-overlapping rects by computing the buttons' total width first and
+    // sizing the info zone to stop before them. This guarantees clicking a
+    // button never also triggers the expand-toggle, regardless of window width.
     #[allow(clippy::too_many_arguments)]
     fn draw_segment_row(
         &mut self, ui: &mut egui::Ui, ctx: &egui::Context,
@@ -482,7 +464,7 @@ impl RecorderApp {
     // -- footer ----------------------------------------------------------------
     fn draw_footer(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (seg_count, is_idle, is_playing) = {
-            let rec = self.recorder.lock().unwrap();
+            let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
             (rec.get_segment_count(), matches!(rec.state, AppState::Idle),
              rec.playback_state == PlaybackState::Playing)
         };
@@ -588,7 +570,7 @@ impl RecorderApp {
     // -- keyboard shortcuts ----------------------------------------------------
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
         ctx.input(|i| {
-            let rec = self.recorder.lock().unwrap();
+            let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
             let state_str = match &rec.state {
                 AppState::Idle      => "idle",
                 AppState::Recording => "recording",
