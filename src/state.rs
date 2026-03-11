@@ -87,24 +87,26 @@ pub struct RecorderState {
 // and the project in which it will add the approved recording to
 impl RecorderState { // master struct
     pub fn new(sample_rate: u32, channels: u16) -> Self {
+        let empty_project = Project {
+            segments: Vec::new(),
+            sample_rate,
+            channels,
+            editing_index: None,
+        };
+
         Self {
             state: AppState::Idle,
-            current: None, // current recording segment
+            current: None,
             is_insertion: false,
             playback_state: PlaybackState::Idle,
-            project: Project {
-                segments: Vec::new(),
-                sample_rate,
-                channels,
-                editing_index: None,
-            },
-            history: Vec::new(),
+            project: empty_project.clone(), 
+            // capture the initial state to be able to undo back to an empty project
+            history: vec![empty_project], 
             history_index: 0,
             previous_current: None,
             next_current: None,
         }
     }
-
     // *** Project History
 
     // save current project state to history (call BEFORE modifying)
