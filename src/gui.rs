@@ -628,17 +628,28 @@ impl RecorderApp {
 
     // -- keyboard shortcuts ----------------------------------------------------
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
-        ctx.input(|i| {
+        // Extract all recorder state BEFORE entering ctx.input().
+        //
+        // DEADLOCK FIX - ctx.input() acquires egui's internal read-lock
+        // the audio thread calls on_new_data() (ctx.request_repaint()) while
+        // holding the recorder mutex, which also needs egui's lock
+        // if holding the recorder mutex inside ctx.input():
+        //   GUI thread: egui lock held -> waiting for recorder mutex
+        //   Audio thread: recorder mutex held -> waiting for egui lock
+        // -> deadlock. Reading recorder state first, then dropping the mutex
+        // before ctx.input(), breaks the cycle entirely.
+        let (state_str, playing, count) = {
             let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
-            let state_str = match &rec.state {
+            let s = match &rec.state {
                 AppState::Idle      => "idle",
                 AppState::Recording => "recording",
                 AppState::Reviewing => "reviewing",
             };
-            let playing = rec.playback_state == PlaybackState::Playing;
-            let count   = rec.get_segment_count();
-            drop(rec);
+            (s, rec.playback_state == PlaybackState::Playing, rec.get_segment_count())
+        }; // recorder mutex fully released here
 
+        ctx.input(|i| {
+            // no recorder access inside this closure no deadlock possible.
             let ctrl = i.modifiers.ctrl || i.modifiers.command;
 
             if i.key_pressed(egui::Key::Questionmark) {

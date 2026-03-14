@@ -31,23 +31,35 @@ pub fn start_input_stream(
     let stream = device.build_input_stream(
         &config.into(),
         move |data: &[f32], _| {
-            // try_lock keeps the continuous audio callback non-blocking
-            if let Ok(mut rec) = recorder.try_lock() {
+            // Determine whether new samples were written with the mutex held,
+            // then call on_new_data() AFTER releasing it to fix deadlock
+            //
+            // on_new_data() calls ctx.request_repaint() which
+            // acquires egui's internal lock. The GUI thread can be inside
+            // ctx.input() (egui lock held) while waiting for the recorder
+            // mutex. If calling on_new_data() while still holding the recorder
+            // mutex we get a lock-order inversion and the app freezes
+            // releasing the mutex first breaks the cycle.
+            let should_repaint = if let Ok(mut rec) = recorder.try_lock() {
                 if let AppState::Recording = rec.state {
-                    if let Some(seg) = rec.current.as_mut() { // samples inserted here
+                    if let Some(seg) = rec.current.as_mut() {
                         if hardware_channels == 1 { // mono, just copy
                             seg.samples.extend_from_slice(data);
                         } else {
-                            // Stereo (or more), down-mix to Mono
+                            // stereo (or more), down-mix to Mono
                             // .chunks_exact(2) gives [[L, R], [L, R], ...] so L + R / 2
                             let mono_data = data //.into() converts u16 into usize
                                 .chunks_exact(hardware_channels as usize)
                                 .map(|frame| frame.iter().sum::<f32>() / hardware_channels as f32);
                             seg.samples.extend(mono_data);
                         }
-                        on_new_data(); // samples have arrived so it can repaint
-                    }
-                }
+                        true // samples written, request repaint
+                    } else { false }
+                } else { false }
+            } else { false }; // try_lock failed, skip this callback
+
+            if should_repaint { // prevent deadlock
+                on_new_data(); // called with no locks held safe
             }
         },
         |err| eprintln!("input error: {:?}", err),
