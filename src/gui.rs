@@ -36,7 +36,7 @@ impl eframe::App for RecorderApp {
         self.handle_keyboard(ctx);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame { fill: BG, ..Default::default() })
+            .frame(egui::Frame::none().fill(BG))
             .show(ctx, |ui| {
                 let avail    = ui.available_width();
                 let side_pad = ((avail - 700.0) / 2.0).max(20.0);
@@ -509,6 +509,16 @@ impl RecorderApp {
                     .pick_file()
                 {
                     self.handle_command(Command::LoadProject(path.to_string_lossy().to_string()));
+                    ctx.request_repaint();
+                }
+            }
+            ui.add_space(8.0);
+
+            // save only active once a path has been set via save as or load
+            let can_save = can_interact && current_save_path.is_some();
+            if footer_btn(ui, "SAVE", can_save, 70.0) {
+                if let Some(ref path) = current_save_path {
+                    self.handle_command(Command::SaveProjectAs(path.clone()));
                     ctx.request_repaint();
                 }
             }
