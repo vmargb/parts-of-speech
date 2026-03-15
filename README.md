@@ -1,12 +1,14 @@
-A non-linear voice-over application that records your voice in manageable chunks with a built-in review workflow. This tool is designed for situations where you need to record long-form content-like narration, podcasts, or voice-overs without the pressure of getting everything perfect in a single continuous take.
+This tool is designed for situations where you need to record long-form content like narration, podcasts, or voice-overs without the pressure of getting everything perfect in a single continuous take, similar to being in a 'recording booth' at a studio:
+
+>**Talkback** is the term for when a producer or engineer communicates with a musician in the recording booth, typically via headphones, to give immediate feedback on a take like approving it as good or directing a redo with specific advice.
 
 ![Application Demo](screenshots/demo1.png)
 
 ## The problem this solves
 
-Traditional recording software forces you to choose between two frustrating workflows: either record everything in one giant file and edit out the mistakes later(which can take hours), or stop and start the recording repeatedly, which becomes tedious. This project offers a middle path. You record in short segments, review each one immediately, and decide on the spot whether to keep or redo the segment with a single keypress. The good takes get appended to your project automatically. No need to mess around with the audio timeline.
+Traditional recording software forces you to choose between two frustrating workflows: either record everything in one giant file and edit out the mistakes later(which can take hours), or stop and start and edit the recording repeatedly, which becomes tedious. This project offers a middle path. You record in short segments, review each one immediately, and decide on the spot whether to keep or redo the segment(including previous takes) with a single keypress. The good takes get appended to your project automatically. No need to mess around with the audio timeline.
 
-You then just throw the exported output into Audacity(or preferred editor) and apply your effects in one go without further editing needed.
+You then just throw the exported output into Audacity(or preferred editor) and apply your effects in one go without further editing.
 
 
 ---
