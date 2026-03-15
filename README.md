@@ -1,6 +1,7 @@
+>**Talkback** is the term for when a producer or engineer communicates with a musician in the recording booth, typically via headphones, to give immediate feedback on a take like approving it as good or directing a redo with specific advice.
+
 This tool is designed for situations where you need to record long-form content like narration, podcasts, or voice-overs without the pressure of getting everything perfect in a single continuous take, similar to being in a 'recording booth' at a studio:
 
->**Talkback** is the term for when a producer or engineer communicates with a musician in the recording booth, typically via headphones, to give immediate feedback on a take like approving it as good or directing a redo with specific advice.
 
 ![Application Demo](screenshots/demo1.png)
 
