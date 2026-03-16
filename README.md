@@ -2,8 +2,15 @@
 
 This tool is designed for situations where you need to record long-form content like narration, podcasts, or voice-overs without the pressure of getting everything perfect in a single continuous take, similar to being in a 'recording booth' at a studio:
 
+<p align="center">
+    <img src="screenshots/demo1.png" alt="Full app demo" width="100%" />
+</p>
 
-![Application Demo](screenshots/demo1.png)
+<p align="center">
+    <img src="screenshots/demo2.png" alt="UI detail 1" width="40%" />
+    <img src="screenshots/demo3.png" alt="UI detail 2" width="40%" />
+</p>
+
 
 ## The problem this solves
 
