@@ -6,7 +6,7 @@ mod gui;
 
 use std::sync::{Arc, Mutex};
 use cpal::traits::StreamTrait;
-use state::{RecorderState, Command, dispatch_command, PlaybackState};
+use state::{RecorderState, Command, dispatch_command, PlaybackState, Segment};
 use audio_output::{play_segment_async, play_project_async, ProjectSnapshot};
 use colored::*;
 
@@ -34,6 +34,25 @@ use colored::*;
 // Finish: Type `e`. export.rs combines all project.segments into one WAV file
 
 
+// -- App settings (non-audio settings, GUI-owned) ---------------------------------
+
+pub struct AppSettings {
+    pub trim_preview_secs: f32, // how many seconds to play when previewing a trim edge (start or end)
+    pub auto_play_on_stop: bool, // whether to auto-play the current segment immediately after stopping
+    pub default_export_dir: Option<String>, // if set, the WAV export file-dialog opens here instead of the project dir
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            trim_preview_secs: 3.0, // previous 3 seconds of s/e
+            auto_play_on_stop: true,
+            default_export_dir: None,
+        }
+    }
+}
+
+
 // RecorderApp is the App struct which owns all long-lived resources
 // and implements eframe::App
 //
@@ -49,6 +68,10 @@ pub struct RecorderApp {
     pub selected_segment:  Option<usize>,
     pub trim_amount:       f32,
     pub show_keybindings:  bool,
+    pub show_settings:     bool,
+    pub theme:             gui::ThemeKind,
+    pub palette:           gui::Palette,
+    pub settings:          AppSettings,
 }
 
 impl RecorderApp {
@@ -57,12 +80,18 @@ impl RecorderApp {
         let recorder = Arc::new(Mutex::new(RecorderState::new(48000, 1)));
         let stream = audio_input::start_input_stream(recorder.clone(), on_new_data);
         stream.play().unwrap();
+        let theme = gui::ThemeKind::Dark;
+        let palette = gui::palette_for(&theme);
         Self {
             recorder,
             _stream: stream,
-            selected_segment: None,
-            trim_amount:      0.10,
-            show_keybindings: false,
+            selected_segment:  None,
+            trim_amount:       0.10,
+            show_keybindings:  false,
+            show_settings:     false,
+            theme,
+            palette,
+            settings:          AppSettings::default(),
         }
     }
 
@@ -80,6 +109,29 @@ impl RecorderApp {
         }
     }
 
+    // Play only the first or last `trim_preview_secs` of a committed segment.
+    // Called after trimming so the user can immediately hear whether the edit
+    // landed correctly, without waiting through the whole clip.
+    pub fn play_segment_edge(&self, idx: usize, from_start: bool) {
+        let rec = self.recorder.lock().unwrap();
+        if rec.playback_state == PlaybackState::Playing { return; }
+        if let Some(seg) = rec.project.segments.get(idx) {
+            let sr = rec.project.sample_rate;
+            let preview_count = (self.settings.trim_preview_secs * sr as f32) as usize;
+            let preview_samples: Vec<f32> = if from_start {
+                // Hear the new beginning of the clip
+                seg.samples[..preview_count.min(seg.samples.len())].to_vec()
+            } else {
+                // Hear the new ending of the clip
+                let start = seg.samples.len().saturating_sub(preview_count);
+                seg.samples[start..].to_vec()
+            };
+            let preview_seg = Segment { samples: preview_samples };
+            drop(rec);
+            play_segment_async(preview_seg, sr, self.recorder.clone(), || {});
+        }
+    }
+
     // PlaySegment / PlayAll / Export are handled here because they need either
     // thread-spawning (playback) or file I/O (export) — not pure state mutation.
     pub fn handle_command(&self, cmd: Command) {
@@ -89,7 +141,9 @@ impl RecorderApp {
                     let mut rec = self.recorder.lock().unwrap();
                     rec.stop_recording(); // change to reviewing
                 }
-                self.play_current_segment(); // auto-play after stopping
+                if self.settings.auto_play_on_stop {
+                    self.play_current_segment(); // auto-play after stopping
+                }
             }
 
             // *** dispatch commands
@@ -185,32 +239,23 @@ impl RecorderApp {
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let use_gui = args.iter().any(|a| a == "--gui");
-    if use_gui { run_gui(); } else { run_cli(); }
-}
-
 fn run_gui() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Parts Of Speech")
-            .with_inner_size([800.0, 600.0])
-            .with_min_inner_size([640.0, 500.0])
-            .with_resizable(true),
+            .with_inner_size([740.0, 600.0])
+            .with_min_inner_size([480.0, 400.0])
+            .with_title("Parts of Speech"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Parts Of Speech",
+        "Parts of Speech",
         options,
         Box::new(|cc| {
             let ctx = cc.egui_ctx.clone();
-            let on_new_data = move || ctx.request_repaint();
-            let app = RecorderApp::new(on_new_data);
-            Ok(Box::new(app))
+            Ok(Box::new(RecorderApp::new(move || ctx.request_repaint())))
         }),
-    ).expect("Failed to launch GUI");
+    ).unwrap();
 }
 
 fn run_cli() {
@@ -259,7 +304,7 @@ fn run_cli() {
                 state::AppState::Reviewing => 
                     format!(" {} {} ", "▶".blue(), "REVIEWING".blue().bold()),
                 state::AppState::Idle if playing => 
-                    format!(" {} {} ({} segs)", "".green(), "PLAYING".green(), count),
+                    format!(" {} {} ({} segs)", "".green(), "PLAYING".green(), count),
                 state::AppState::Idle => 
                     format!(" {} {} ({} segs, {})", "○".dimmed(), "IDLE".dimmed(), count, total_time),
             }
@@ -396,3 +441,11 @@ fn run_cli() {
     }
 }
 
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.contains(&"--gui".to_string()) {
+        run_gui();
+    } else {
+        run_cli();
+    }
+}
