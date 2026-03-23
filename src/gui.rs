@@ -430,8 +430,9 @@ impl RecorderApp {
             let ip  = rec.playback_state == PlaybackState::Playing;
             let ii  = matches!(rec.state, AppState::Idle);
             let td: f32 = rec.project.segments.iter().map(|s| s.duration_seconds(sr)).sum();
-            let meta: Vec<(usize, usize, f32)> = rec.project.segments.iter().enumerate()
-                .map(|(i, s)| (i, s.samples.len(), s.duration_seconds(sr)))
+            // (index, sample_count, duration_secs, is_silence)
+            let meta: Vec<(usize, usize, f32, bool)> = rec.project.segments.iter().enumerate()
+                .map(|(i, s)| (i, s.samples.len(), s.duration_seconds(sr), s.is_silence))
                 .collect();
             (rec.get_segment_count(), ip, ii, td, meta)
         }; //  mutex released here, drawing happens with no lock held
@@ -480,9 +481,9 @@ impl RecorderApp {
             .max_height(scroll_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                for (idx, n, dur) in &meta {
+                for (idx, n, dur, is_silence) in &meta {
                     let selected = self.selected_segment == Some(*idx);
-                    let req = self.draw_segment_row(ui, ctx, *idx, *n, *dur,
+                    let req = self.draw_segment_row(ui, ctx, *idx, *n, *dur, *is_silence,
                                                     is_playing, is_idle, selected);
                     if let Some(edge) = req { preview_request = Some(edge); }
                     ui.add_space(3.0);
@@ -497,8 +498,11 @@ impl RecorderApp {
 
     // -- Segment row -----------------------------------------------------------
     //
-    // returns Some((idx, from_start)) if the user clicked a trim-preview button,
-    // so draw_segment_list can execute the playback after the scroll area finishes.
+    // Silence segments render with a blue-tinted background, a "SILENCE" badge
+    // instead of the sample-count, and a different expand panel:
+    //   • Row 1: EXPAND controls (add more silence) + TRIM controls
+    //   • Row 2: duration readout only  (no preview buttons — previewing silence
+    //            isn't useful)
     //
     // use ONE allocate_exact_size for the full row rect (advances the
     // layout cursor), then ui.interact(sub_rect, unique_id, sense) for every
@@ -507,7 +511,7 @@ impl RecorderApp {
     #[allow(clippy::too_many_arguments)]
     fn draw_segment_row(
         &mut self, ui: &mut egui::Ui, ctx: &egui::Context,
-        idx: usize, samples: usize, duration: f32,
+        idx: usize, samples: usize, duration: f32, is_silence: bool,
         is_playing: bool, is_idle: bool, is_selected: bool,
     ) -> Option<(usize, bool)> {
         let p = &self.palette;
@@ -521,35 +525,64 @@ impl RecorderApp {
         let btn_w    = 50.0_f32;
         let btn_h    = 26.0_f32;
         let btn_gap  = 3.0_f32;
-        let n_btns   = if is_idle && !is_playing { 4 } else { 0 };
+        // silence rows omit RETRY (can't re-record silence)
+        let n_btns   = if is_idle && !is_playing { if is_silence { 3 } else { 4 } } else { 0 };
         let btns_total = if n_btns > 0 { n_btns as f32 * btn_w + (n_btns - 1) as f32 * btn_gap + 8.0 } else { 0.0 };
 
         // -- allocate the whole row (advances layout cursor) -------------------
         let (row_rect, _) = ui.allocate_exact_size(Vec2::new(row_w, total_h), Sense::hover());
 
         // -- background & border -----------------------------------------------
-        let bg = if is_selected { blend(p.surf, p.blue, 0.07) }
-                 else { Color32::from_rgb(
-                     p.bg.r().saturating_add(5),
-                     p.bg.g().saturating_add(5),
-                     p.bg.b().saturating_add(7)) };
-        let border_col = if is_selected { blend(p.border, p.blue, 0.5) } else { p.border };
+        // Silence rows use a desaturated blue tint so they're immediately
+        // distinguishable from recorded audio
+        let silence_base = blend(p.bg, p.blue, 0.10);
+        let bg = if is_silence {
+            if is_selected { blend(silence_base, p.blue, 0.10) } else { silence_base }
+        } else if is_selected { blend(p.surf, p.blue, 0.07) } else {
+            Color32::from_rgb(
+                p.bg.r().saturating_add(5),
+                p.bg.g().saturating_add(5),
+                p.bg.b().saturating_add(7))
+        };
+        let border_col = if is_silence {
+            if is_selected { blend(p.border, p.blue, 0.70) } else { blend(p.border, p.blue, 0.40) }
+        } else if is_selected { blend(p.border, p.blue, 0.5) } else { p.border };
+
         ui.painter().rect(row_rect, Rounding::same(6.0), bg, Stroke::new(1.0, border_col));
 
         // -- info text ---------------------------------------------------------
         let cy = row_rect.min.y + main_h / 2.0;
+
+        // Index number — silence rows rendered in blue, audio rows in mono (teal)
+        let idx_col = if is_silence { p.blue } else { p.mono };
         ui.painter().text(Pos2::new(row_rect.min.x + 18.0, cy),
             egui::Align2::CENTER_CENTER,
-            format!("{:02}", idx + 1), FontId::monospace(13.0), p.mono);
+            format!("{:02}", idx + 1), FontId::monospace(13.0), idx_col);
+
         let dm = (duration / 60.0) as u32;
         ui.painter().text(Pos2::new(row_rect.min.x + 52.0, cy),
             egui::Align2::LEFT_CENTER,
             format!("{:02}:{:04.1}", dm, duration % 60.0), FontId::monospace(12.0), p.text);
-        ui.painter().text(Pos2::new(row_rect.min.x + 140.0, cy),
-            egui::Align2::LEFT_CENTER,
-            format!("{} smp", samples), FontId::monospace(9.0), p.dim);
 
-        // -- info zone click (expand/collapse trim panel) ----------------
+        if is_silence {
+            // "SILENCE" badge replaces the sample count to make the type obvious at a glance.
+            // Draw a small filled pill for the badge background, then the text on top.
+            let badge_x = row_rect.min.x + 140.0;
+            let badge_rect = Rect::from_center_size(
+                Pos2::new(badge_x + 24.0, cy),
+                Vec2::new(52.0, 14.0));
+            ui.painter().rect_filled(badge_rect, Rounding::same(3.0),
+                Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 40));
+            ui.painter().text(badge_rect.center(), egui::Align2::CENTER_CENTER,
+                "SILENCE", FontId::monospace(7.5),
+                blend(p.blue, p.text, 0.55));
+        } else {
+            ui.painter().text(Pos2::new(row_rect.min.x + 140.0, cy),
+                egui::Align2::LEFT_CENTER,
+                format!("{} smp", samples), FontId::monospace(9.0), p.dim);
+        }
+
+        // -- info zone click (expand/collapse trim panel) ----------------------
         let info_w    = (row_w - btns_total - 10.0).max(10.0);
         let info_rect = Rect::from_min_size(row_rect.min, Vec2::new(info_w, main_h));
         let info_resp = ui.interact(info_rect, ui.id().with(("info", idx)), Sense::click());
@@ -561,13 +594,21 @@ impl RecorderApp {
         // -- action buttons (right side, explicit pixel positions) -------------
         let mut pending: Option<Command> = None;
         if is_idle && !is_playing {
-            // left-to-right order: INSERT  PLAY  RETRY  DEL
-            let specs: &[(&str, Color32, fn(usize) -> Command)] = &[
+            // Silence rows: INSERT  PLAY  DEL  (no RETRY silence isn't a take)
+            // Normal rows:  INSERT  PLAY  RETRY  DEL
+            let specs_normal: &[(&str, Color32, fn(usize) -> Command)] = &[
                 ("INSERT", p.blue,  Command::InsertAfter   as fn(usize) -> Command),
                 ("PLAY",   p.play,  Command::PlaySegment   as fn(usize) -> Command),
                 ("RETRY",  p.amber, Command::RetrySegment  as fn(usize) -> Command),
                 ("DEL",    p.rec,   Command::DeleteSegment as fn(usize) -> Command),
             ];
+            let specs_silence: &[(&str, Color32, fn(usize) -> Command)] = &[
+                ("INSERT", p.blue,  Command::InsertAfter   as fn(usize) -> Command),
+                ("PLAY",   p.play,  Command::PlaySegment   as fn(usize) -> Command),
+                ("DEL",    p.rec,   Command::DeleteSegment as fn(usize) -> Command),
+            ];
+            let specs = if is_silence { specs_silence } else { specs_normal };
+
             let start_x = row_rect.max.x - btns_total + 4.0;
             for (i, (lbl, col, cmd_fn)) in specs.iter().enumerate() {
                 let x = start_x + i as f32 * (btn_w + btn_gap);
@@ -600,93 +641,218 @@ impl RecorderApp {
             let sep_y = row_rect.min.y + main_h + 3.0;
             ui.painter().line_segment(
                 [Pos2::new(row_rect.min.x + 8.0, sep_y), Pos2::new(row_rect.max.x - 8.0, sep_y)],
-                Stroke::new(1.0, p.border));
+                Stroke::new(1.0, border_col));
 
-            // -- row 1: TRIM amount + trim start/end buttons -------------------
-            let row1_rect = Rect::from_min_size(
-                Pos2::new(row_rect.min.x + 8.0, sep_y + 4.0),
-                Vec2::new((row_w - 16.0).max(10.0), 26.0));
+            let panel_x   = row_rect.min.x + 8.0;
+            let panel_w   = (row_w - 16.0).max(10.0);
+            let row1_rect = Rect::from_min_size(Pos2::new(panel_x, sep_y + 4.0),  Vec2::new(panel_w, 26.0));
+            let row2_rect = Rect::from_min_size(Pos2::new(panel_x, sep_y + 34.0), Vec2::new(panel_w, 24.0));
 
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row1_rect), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("TRIM").font(FontId::monospace(8.0)).color(p.dim));
-                    ui.add_space(6.0);
-                    ui.add(egui::DragValue::new(&mut self.trim_amount)
-                        .range(0.0_f32..=60.0).speed(0.01).suffix(" s").fixed_decimals(2));
-                    ui.add_space(10.0);
-                    let ta = self.trim_amount;
-                    let can_trim = ta > 0.0 && is_idle && !is_playing;
-                    for (lbl, is_start) in [
-                        ("< trim start", true),
-                        ("trim end >",   false),
-                    ] {
-                        let (tr, tresp) = ui.allocate_exact_size(
-                            Vec2::new(76.0, 20.0),
-                            if can_trim { Sense::click() } else { Sense::hover() });
-                        let th = tresp.hovered() && can_trim;
-                        ui.painter().rect(tr, Rounding::same(3.0),
-                            if th { Color32::from_rgba_unmultiplied(p.amber.r(), p.amber.g(), p.amber.b(), 35) } else { p.surf3 },
-                            Stroke::new(1.0, if th { p.amber } else { p.border }));
-                        ui.painter().text(tr.center(), egui::Align2::CENTER_CENTER,
-                            lbl, FontId::monospace(7.5), if can_trim { p.amber } else { p.muted });
-                        if tresp.clicked() && can_trim {
-                            pending = Some(if is_start {
-                                Command::TrimStart(Some(idx), ta)
-                            } else {
-                                Command::TrimEnd(Some(idx), ta)
-                            });
-                            // mark which edge was trimmed so we can auto-preview it
-                            preview_edge = Some(is_start);
+            if is_silence {
+                // ── SILENCE expand panel ────────────────────────────────────
+                //
+                // Row 1: EXPAND controls + TRIM controls side-by-side.
+                //   Expanding adds more zeros to the end; trimming removes from
+                //   either end — both work identically to their audio counterparts.
+                //
+                // Row 2: Duration readout only (no preview — silence is silent).
+
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row1_rect), |ui| {
+                    ui.horizontal(|ui| {
+                        // ── Expand section ────────────────────────────────────
+                        ui.label(RichText::new("EXPAND").font(FontId::monospace(8.0)).color(p.blue));
+                        ui.add_space(4.0);
+                        ui.add(egui::DragValue::new(&mut self.silence_secs)
+                            .range(0.01_f32..=60.0).speed(0.01).suffix(" s").fixed_decimals(2));
+                        ui.add_space(6.0);
+
+                        let ss = self.silence_secs;
+                        let can_act = ss > 0.0 && is_idle && !is_playing;
+
+                        let (exp_r, exp_resp) = ui.allocate_exact_size(
+                            Vec2::new(62.0, 20.0),
+                            if can_act { Sense::click() } else { Sense::hover() });
+                        let eh = exp_resp.hovered() && can_act;
+                        ui.painter().rect(exp_r, Rounding::same(3.0),
+                            if eh { Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 35) } else { p.surf3 },
+                            Stroke::new(1.0, if eh { p.blue } else { border_col }));
+                        ui.painter().text(exp_r.center(), egui::Align2::CENTER_CENTER,
+                            "expand +", FontId::monospace(7.5),
+                            if can_act { p.blue } else { p.muted });
+                        if exp_resp.clicked() && can_act {
+                            pending = Some(Command::ExpandSilence(idx, ss));
                             ctx.request_repaint();
                         }
+
+                        // ── Visual divider ───────────────────────────────────
+                        ui.add_space(10.0);
+                        let divider_rect = ui.painter().clip_rect();
+                        let dx = ui.next_widget_position().x;
+                        ui.painter().line_segment(
+                            [Pos2::new(dx, divider_rect.min.y + 4.0),
+                             Pos2::new(dx, divider_rect.min.y + 20.0)],
+                            Stroke::new(1.0, p.border));
+                        ui.add_space(10.0);
+
+                        // ── Trim section ─────────────────────────────────────
+                        ui.label(RichText::new("TRIM").font(FontId::monospace(8.0)).color(p.dim));
                         ui.add_space(4.0);
-                    }
+                        ui.add(egui::DragValue::new(&mut self.trim_amount)
+                            .range(0.0_f32..=60.0).speed(0.01).suffix(" s").fixed_decimals(2));
+                        ui.add_space(8.0);
+
+                        let ta = self.trim_amount;
+                        let can_trim = ta > 0.0 && is_idle && !is_playing;
+                        for (lbl, is_start) in [
+                            ("< trim start", true),
+                            ("trim end >",   false),
+                        ] {
+                            let (tr, tresp) = ui.allocate_exact_size(
+                                Vec2::new(68.0, 20.0),
+                                if can_trim { Sense::click() } else { Sense::hover() });
+                            let th = tresp.hovered() && can_trim;
+                            ui.painter().rect(tr, Rounding::same(3.0),
+                                if th { Color32::from_rgba_unmultiplied(p.amber.r(), p.amber.g(), p.amber.b(), 35) } else { p.surf3 },
+                                Stroke::new(1.0, if th { p.amber } else { p.border }));
+                            ui.painter().text(tr.center(), egui::Align2::CENTER_CENTER,
+                                lbl, FontId::monospace(7.5), if can_trim { p.amber } else { p.muted });
+                            if tresp.clicked() && can_trim {
+                                pending = Some(if is_start {
+                                    Command::TrimStart(Some(idx), ta)
+                                } else {
+                                    Command::TrimEnd(Some(idx), ta)
+                                });
+                                ctx.request_repaint();
+                            }
+                            ui.add_space(4.0);
+                        }
+                    });
                 });
-            });
 
-            // -- row 2: Duration readout + preview buttons ---------------------
-            let row2_rect = Rect::from_min_size(
-                Pos2::new(row_rect.min.x + 8.0, sep_y + 34.0),
-                Vec2::new((row_w - 16.0).max(10.0), 24.0));
+                // Row 2: duration only
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row2_rect), |ui| {
+                    ui.horizontal(|ui| {
+                        let dm = (duration / 60.0) as u32;
+                        let ds = duration % 60.0;
+                        ui.label(RichText::new(format!("dur  {:02}:{:05.2}", dm, ds))
+                            .font(FontId::monospace(8.0)).color(p.dim));
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("silence — no audio preview")
+                            .font(FontId::monospace(7.5))
+                            .color(Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 120)));
+                    });
+                });
 
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row2_rect), |ui| {
-                ui.horizontal(|ui| {
-                    // live duration display — updates instantly after each trim
-                    let dm = (duration / 60.0) as u32;
-                    let ds = duration % 60.0;
-                    ui.label(RichText::new(format!("dur  {:02}:{:05.2}", dm, ds))
-                        .font(FontId::monospace(8.0)).color(p.dim));
+            } else {
+                // ── Normal (audio) segment expand panel ──────────────────────
+                //
+                // Row 1: TRIM amount + trim start/end buttons  (unchanged)
+                // Row 2: Duration + preview start/end + silence_secs DragValue + "+ silence after"
+                //   The silence shortcut lets the user add a pause right after this
+                //   take without scrolling away or using a separate command.
 
-                    ui.add_space(14.0);
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row1_rect), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("TRIM").font(FontId::monospace(8.0)).color(p.dim));
+                        ui.add_space(6.0);
+                        ui.add(egui::DragValue::new(&mut self.trim_amount)
+                            .range(0.0_f32..=60.0).speed(0.01).suffix(" s").fixed_decimals(2));
+                        ui.add_space(10.0);
+                        let ta = self.trim_amount;
+                        let can_trim = ta > 0.0 && is_idle && !is_playing;
+                        for (lbl, is_start) in [
+                            ("< trim start", true),
+                            ("trim end >",   false),
+                        ] {
+                            let (tr, tresp) = ui.allocate_exact_size(
+                                Vec2::new(76.0, 20.0),
+                                if can_trim { Sense::click() } else { Sense::hover() });
+                            let th = tresp.hovered() && can_trim;
+                            ui.painter().rect(tr, Rounding::same(3.0),
+                                if th { Color32::from_rgba_unmultiplied(p.amber.r(), p.amber.g(), p.amber.b(), 35) } else { p.surf3 },
+                                Stroke::new(1.0, if th { p.amber } else { p.border }));
+                            ui.painter().text(tr.center(), egui::Align2::CENTER_CENTER,
+                                lbl, FontId::monospace(7.5), if can_trim { p.amber } else { p.muted });
+                            if tresp.clicked() && can_trim {
+                                pending = Some(if is_start {
+                                    Command::TrimStart(Some(idx), ta)
+                                } else {
+                                    Command::TrimEnd(Some(idx), ta)
+                                });
+                                // mark which edge was trimmed so we can auto-preview it
+                                preview_edge = Some(is_start);
+                                ctx.request_repaint();
+                            }
+                            ui.add_space(4.0);
+                        }
+                    });
+                });
 
-                    let can_preview = is_idle && !is_playing;
-                    let preview_secs = self.settings.trim_preview_secs;
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row2_rect), |ui| {
+                    ui.horizontal(|ui| {
+                        // live duration display — updates instantly after each trim
+                        let dm = (duration / 60.0) as u32;
+                        let ds = duration % 60.0;
+                        ui.label(RichText::new(format!("dur  {:02}:{:05.2}", dm, ds))
+                            .font(FontId::monospace(8.0)).color(p.dim));
 
-                    for (lbl, from_start) in [
-                        (format!("▶ preview start ({:.0}s)", preview_secs), true),
-                        (format!("▶ preview end ({:.0}s)",   preview_secs), false),
-                    ] {
-                        let (pr, presp) = ui.allocate_exact_size(
-                            Vec2::new(110.0, 18.0),
-                            if can_preview { Sense::click() } else { Sense::hover() });
-                        let ph = presp.hovered() && can_preview;
-                        ui.painter().rect(pr, Rounding::same(3.0),
-                            if ph { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 28) } else { p.surf2 },
-                            Stroke::new(1.0, if ph { p.play } else { p.border }));
-                        ui.painter().text(pr.center(), egui::Align2::CENTER_CENTER,
-                            &lbl, FontId::monospace(7.0),
-                            if can_preview { p.play } else { p.muted });
-                        if presp.clicked() && can_preview {
-                            preview_edge = Some(from_start);
+                        ui.add_space(14.0);
+
+                        let can_preview = is_idle && !is_playing;
+                        let preview_secs = self.settings.trim_preview_secs;
+
+                        for (lbl, from_start) in [
+                            (format!("▶ preview start ({:.0}s)", preview_secs), true),
+                            (format!("▶ preview end ({:.0}s)",   preview_secs), false),
+                        ] {
+                            let (pr, presp) = ui.allocate_exact_size(
+                                Vec2::new(110.0, 18.0),
+                                if can_preview { Sense::click() } else { Sense::hover() });
+                            let ph = presp.hovered() && can_preview;
+                            ui.painter().rect(pr, Rounding::same(3.0),
+                                if ph { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 28) } else { p.surf2 },
+                                Stroke::new(1.0, if ph { p.play } else { p.border }));
+                            ui.painter().text(pr.center(), egui::Align2::CENTER_CENTER,
+                                &lbl, FontId::monospace(7.0),
+                                if can_preview { p.play } else { p.muted });
+                            if presp.clicked() && can_preview {
+                                preview_edge = Some(from_start);
+                                ctx.request_repaint();
+                            }
+                            ui.add_space(4.0);
+                        }
+
+                        // ── + silence after ───────────────────────────────────
+                        // Inline shortcut: insert a silence segment after this take.
+                        // Uses self.silence_secs so the user can tune the default in
+                        // one place and apply it across multiple segments.
+                        ui.add_space(6.0);
+                        ui.add(egui::DragValue::new(&mut self.silence_secs)
+                            .range(0.01_f32..=60.0).speed(0.01).suffix(" s").fixed_decimals(2));
+                        ui.add_space(4.0);
+
+                        let ss = self.silence_secs;
+                        let can_sil = ss > 0.0 && is_idle && !is_playing;
+                        let (sr, sresp) = ui.allocate_exact_size(
+                            Vec2::new(80.0, 18.0),
+                            if can_sil { Sense::click() } else { Sense::hover() });
+                        let sh = sresp.hovered() && can_sil;
+                        ui.painter().rect(sr, Rounding::same(3.0),
+                            if sh { Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 28) } else { p.surf2 },
+                            Stroke::new(1.0, if sh { p.blue } else { p.border }));
+                        ui.painter().text(sr.center(), egui::Align2::CENTER_CENTER,
+                            "+ silence after", FontId::monospace(7.0),
+                            if can_sil { p.blue } else { p.muted });
+                        if sresp.clicked() && can_sil {
+                            pending = Some(Command::InsertSilenceAfter(idx, ss));
                             ctx.request_repaint();
                         }
-                        ui.add_space(4.0);
-                    }
+                    });
                 });
-            });
+            }
         }
 
-        // execute trim command first, then signal playback of the edge preview
+        // execute trim/expand/silence command first, then signal playback of the edge preview
         if let Some(cmd) = pending { self.handle_command(cmd); }
 
         // return the preview request to the caller (draw_segment_list) so it can
@@ -838,8 +1004,10 @@ impl RecorderApp {
                         ("Ctrl-Shift-Z / Ctrl-Y", "Redo",                        p.muted),
                         ("?",                     "Toggle keybindings panel",    p.mono),
                         ("Esc",                   "Close any open panel",        p.dim),
-                        ("click segment row",     "Expand / collapse trim",      p.blue),
+                        ("click segment row",     "Expand / collapse panel",     p.blue),
                         ("hover segment row",     "Reveal play / retry / del",   p.dim),
+                        ("+ silence after",       "Insert silence (in expand)",  p.blue),
+                        ("expand +",              "Lengthen silence segment",    p.blue),
                     ];
 
                     let scroll_h = card_h - 100.0;

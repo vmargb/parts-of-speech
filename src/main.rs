@@ -67,6 +67,7 @@ pub struct RecorderApp {
     // GUI state, not visible to audio threads
     pub selected_segment:  Option<usize>,
     pub trim_amount:       f32,
+    pub silence_secs:      f32, // silent segs
     pub show_keybindings:  bool,
     pub show_settings:     bool,
     pub theme:             gui::ThemeKind,
@@ -87,6 +88,7 @@ impl RecorderApp {
             _stream: stream,
             selected_segment:  None,
             trim_amount:       0.10,
+            silence_secs:      1.0,
             show_keybindings:  false,
             show_settings:     false,
             theme,
@@ -126,7 +128,8 @@ impl RecorderApp {
                 let start = seg.samples.len().saturating_sub(preview_count);
                 seg.samples[start..].to_vec()
             };
-            let preview_seg = Segment { samples: preview_samples };
+            // is_silence: false this is always a short preview clip, not a silence placeholder
+            let preview_seg = Segment { samples: preview_samples, is_silence: false };
             drop(rec);
             play_segment_async(preview_seg, sr, self.recorder.clone(), || {});
         }
@@ -266,7 +269,6 @@ fn run_cli() {
         // Clear the screen and move cursor to home position
         if clear {
             print!("\x1B[2J\x1B[H");
-            // Print header and commands
             println!("{}", "=".repeat(60).cyan());
             println!("  {} — {}", "PARTS OF SPEECH".bold().bright_white(), "CLI Mode".italic());
             println!("{}", "  (run with --gui for the graphical interface)".dimmed());
@@ -287,6 +289,7 @@ fn run_cli() {
                 );
             }
             println!("\n  {}  {} <secs> | {} #n", "TRIM:".dimmed(), "trim start|end".yellow(), "delete".red());
+            println!("  {}  {} #n [secs]  |  {} #n [secs]", "SILENCE:".dimmed(), "silence".yellow(), "expand".yellow());
             println!("  {}  {}", "EXIT:".dimmed(), "e (export) | quit".red());
             println!("{}", "-".repeat(60).cyan());
         }
@@ -368,6 +371,38 @@ fn run_cli() {
                     app.handle_command(Command::DeleteSegment(n - 1));
                 }
             }
+            // insert a silence segment after segment #n (1-based).
+            // silence <n> [seconds]
+            "silence" => {
+                if let Some(n) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) {
+                    let secs = parts.get(2)
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .unwrap_or(1.0)
+                        .max(0.01);
+                    app.handle_command(Command::InsertSilenceAfter(n - 1, secs));
+                    println!("Inserted {:.2}s silence after segment {}.", secs, n);
+                } else {
+                    println!("Usage: silence <segment_number> [seconds]");
+                    println!("Example: silence 2       (1s of silence after segment 2)");
+                    println!("         silence 2 0.5   (0.5s of silence after segment 2)");
+                }
+            }
+            // Expand an existing silence segment by adding more silence.
+            // expand <n> [seconds]
+            "expand" => {
+                if let Some(n) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) {
+                    let secs = parts.get(2)
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .unwrap_or(0.5)
+                        .max(0.01);
+                    app.handle_command(Command::ExpandSilence(n - 1, secs));
+                    println!("Expanded segment {} by {:.2}s.", n, secs);
+                } else {
+                    println!("Usage: expand <segment_number> [seconds]");
+                    println!("Example: expand 3       (add 0.5s to silence segment 3)");
+                    println!("         expand 3 1.5   (add 1.5s to silence segment 3)");
+                }
+            }
             "trim" => {
                 if parts.len() < 3 { // requires minimum 3 parts trim + pos + ...
                     println!("Usage: trim start|end [segment_number] seconds");
@@ -418,13 +453,23 @@ fn run_cli() {
                     println!("\n  {}", "PROJECT SEGMENTS".underline());
                     for (i, seg) in rec.project.segments.iter().enumerate() {
                         let dur = seg.duration_seconds(rec.project.sample_rate);
-                        println!(
-                            "  {:>2}. [{}] {:>5.2}s  {}", 
-                            (i + 1).to_string().bright_white(),
-                            "■".repeat((dur as usize).min(10)).green(), // simple "sparkline"
-                            dur,
-                            format!("({} samples)", seg.samples.len()).dimmed()
-                        );
+                        if seg.is_silence {
+                            println!(
+                                "  {:>2}. [{}] {:>5.2}s  {}",
+                                (i + 1).to_string().bright_white(),
+                                "~".repeat((dur as usize).min(10)).cyan(),
+                                dur,
+                                "(silence)".dimmed()
+                            );
+                        } else {
+                            println!(
+                                "  {:>2}. [{}] {:>5.2}s  {}", 
+                                (i + 1).to_string().bright_white(),
+                                "■".repeat((dur as usize).min(10)).green(),
+                                dur,
+                                format!("({} samples)", seg.samples.len()).dimmed()
+                            );
+                        }
                     }
                     println!();
                 }

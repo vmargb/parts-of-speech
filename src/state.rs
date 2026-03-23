@@ -10,6 +10,12 @@ use serde::{Serialize, Deserialize};
 pub struct Segment { // a single recording take
     // the actual audio numbers
     pub samples: Vec<f32>, // raw audio data (32-bit float samples)
+    // if true, this segment was created as intentional silence (not a recording).
+    // silence segments render differently in the GUI and support expansion (adding more
+    // silence) in addition to trimming. Serialised so projects round-trip correctly.
+    // NOTE: bincode uses positional encoding, so old project files saved without this field
+    // will fail to deserialise. If you need backwards compat, migrate to a versioned format.
+    pub is_silence: bool,
 }
 // a segment is one recorded chunk
 // for recording replacements (retry)
@@ -66,6 +72,10 @@ pub enum Command {
     DeleteSegment(usize),
     TrimStart(Option<usize>, f32),
     TrimEnd(Option<usize>, f32),   // (index, seconds) - None = current
+    // Insert a silence segment of `seconds` duration after the given index.
+    InsertSilenceAfter(usize, f32),
+    // Add `seconds` of extra silence to an existing silence segment at the given index.
+    ExpandSilence(usize, f32),
     Undo,
     Redo,
     Export(Option<String>), // None = use auto-path, Some = use explicit path
@@ -225,7 +235,7 @@ impl RecorderState { // master struct
     pub fn start_recording(&mut self) {
         self.state = AppState::Recording;
         self.is_insertion = false; // append not insert
-        self.current = Some(Segment { samples: Vec::new() });
+        self.current = Some(Segment { samples: Vec::new(), is_silence: false });
         self.project.editing_index = None; // None: segment at end default
         // starting a new take invalidates old undo history for the previous take
         self.previous_current = None;
@@ -276,7 +286,7 @@ impl RecorderState { // master struct
     pub fn retry_current_take(&mut self) {
         if self.state == AppState::Reviewing {
             // Create a new empty segment for the retry
-            self.current = Some(Segment { samples: Vec::new() });
+            self.current = Some(Segment { samples: Vec::new(), is_silence: false });
             // Switch back to recording from Idle
             self.state = AppState::Recording; // automatically starts recording
             // IMPORTANT: We do NOT reset editing_index or is_insertion here.
@@ -292,7 +302,7 @@ impl RecorderState { // master struct
         
         self.project.editing_index = Some(index);
         self.is_insertion = false; // overwriting
-        self.current = Some(Segment { samples: Vec::new() });
+        self.current = Some(Segment { samples: Vec::new(), is_silence: false });
         self.state = AppState::Recording;
         true
     }
@@ -303,7 +313,7 @@ impl RecorderState { // master struct
         
         self.project.editing_index = Some(after_index + 1); // index after
         self.is_insertion = true; // inserting
-        self.current = Some(Segment { samples: Vec::new() });
+        self.current = Some(Segment { samples: Vec::new(), is_silence: false });
         self.state = AppState::Recording;
         true
     }
@@ -315,14 +325,34 @@ impl RecorderState { // master struct
         true
     }
 
-    // optionally add empty segments in between recordings
-    // silence(0.5, sample_rate) would add a 0.5s silence
-    #[allow(unused)]
-    fn silence(seconds: f32, sample_rate: u32) -> Segment {
+    // silence segment of exactly `seconds` duration.
+    pub fn make_silence(seconds: f32, sample_rate: u32) -> Segment {
         let count = (seconds * sample_rate as f32) as usize;
         Segment {
             samples: vec![0.0; count],
+            is_silence: true,
         }
+    }
+
+    // insert a silence segment of `seconds` duration after `after_index`
+    pub fn insert_silence_after(&mut self, after_index: usize, seconds: f32) -> bool {
+        if after_index >= self.project.segments.len() { return false; }
+        let sr = self.project.sample_rate;
+        let seg = Self::make_silence(seconds, sr);
+        self.project.segments.insert(after_index + 1, seg);
+        true
+    }
+
+    // append `extra_seconds` of additional silence to an existing silence segment
+    // return false if the segment at `index` is not a silence segment
+    pub fn expand_silence(&mut self, index: usize, extra_seconds: f32) -> bool {
+        if index >= self.project.segments.len() { return false; }
+        let sr = self.project.sample_rate;
+        let seg = &mut self.project.segments[index];
+        if !seg.is_silence { return false; }
+        let extra = (extra_seconds * sr as f32) as usize;
+        seg.samples.extend(vec![0.0_f32; extra]);
+        true
     }
 
     pub fn trim_start(&mut self, segment_index: Option<usize>, seconds: f32) -> bool {
@@ -511,6 +541,46 @@ mod tests {
         assert!(rec.current.is_none());
     }
 
+    #[test]
+    fn test_silence_insert_and_expand() {
+        let mut rec = RecorderState::new(48000, 1);
+
+        // record two segments
+        rec.start_recording();
+        simulate_recording(&mut rec, vec![1.0; 48000]); // 1s
+        rec.stop_recording();
+        rec.approve();
+
+        rec.start_recording();
+        simulate_recording(&mut rec, vec![2.0; 48000]); // 1s
+        rec.stop_recording();
+        rec.approve();
+
+        // insert 0.5s silence between them
+        let ok = rec.insert_silence_after(0, 0.5);
+        assert!(ok);
+        assert_eq!(rec.get_segment_count(), 3);
+        assert!(rec.project.segments[1].is_silence);
+        assert_eq!(rec.project.segments[1].samples.len(), 24000); // 0.5 * 48000
+
+        // expand that silence by another 0.5s -> 1s total
+        let ok = rec.expand_silence(1, 0.5);
+        assert!(ok);
+        assert_eq!(rec.project.segments[1].samples.len(), 48000); // 1.0 * 48000
+
+        // expanding a non-silence segment should fail
+        let ok = rec.expand_silence(0, 0.5);
+        assert!(!ok);
+    }
+
+    #[test]
+    fn test_silence_is_flagged() {
+        let seg = RecorderState::make_silence(2.0, 44100);
+        assert!(seg.is_silence);
+        assert_eq!(seg.samples.len(), 88200);
+        assert!(seg.samples.iter().all(|&s| s == 0.0));
+    }
+
     // test the Command enum dispatch these are only
     // commands that don't involve audio I/O can be tested directly
     #[test]
@@ -533,18 +603,20 @@ mod tests {
 // because they need hold Arc<Mutex<RecorderState>> + threads and file I/O
 pub fn dispatch_command(rec: &mut RecorderState, cmd: Command) {
     match cmd {
-        Command::StartRecording       => rec.start_recording(),
-        Command::StopRecording        => rec.stop_recording(),
-        Command::Approve              => { rec.approve(); rec.save_state(); }
-        Command::Reject               => rec.reject(),
-        Command::RetryCurrentTake     => rec.retry_current_take(), // saved in prev_current
-        Command::RetrySegment(i)      => { rec.retry_segment(i); rec.save_state(); }
-        Command::InsertAfter(i)       => { rec.insert_segment(i); rec.save_state(); }
-        Command::DeleteSegment(i)     => { rec.delete_segment(i); rec.save_state(); }
-        Command::TrimStart(idx, secs) => { rec.trim_start(idx, secs); } // saved in prev_current
-        Command::TrimEnd(idx, secs)   => { rec.trim_end(idx, secs); }
-        Command::Undo                 => { rec.undo(); }
-        Command::Redo                 => { rec.redo(); }
+        Command::StartRecording           => rec.start_recording(),
+        Command::StopRecording            => rec.stop_recording(),
+        Command::Approve                  => { rec.approve(); rec.save_state(); }
+        Command::Reject                   => rec.reject(),
+        Command::RetryCurrentTake         => rec.retry_current_take(), // saved in prev_current
+        Command::RetrySegment(i)          => { rec.retry_segment(i); rec.save_state(); }
+        Command::InsertAfter(i)           => { rec.insert_segment(i); rec.save_state(); }
+        Command::DeleteSegment(i)         => { rec.delete_segment(i); rec.save_state(); }
+        Command::TrimStart(idx, secs)     => { rec.trim_start(idx, secs); } // saved in prev_current
+        Command::TrimEnd(idx, secs)       => { rec.trim_end(idx, secs); }
+        Command::InsertSilenceAfter(i, s) => { rec.save_state(); rec.insert_silence_after(i, s); }
+        Command::ExpandSilence(i, s)      => { rec.save_state(); rec.expand_silence(i, s); }
+        Command::Undo                     => { rec.undo(); }
+        Command::Redo                     => { rec.redo(); }
         _ => {}
     }
 }
