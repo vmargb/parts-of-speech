@@ -5,6 +5,7 @@ mod export;
 mod gui;
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use cpal::traits::StreamTrait;
 use state::{RecorderState, Command, dispatch_command, PlaybackState, Segment};
 use audio_output::{play_segment_async, play_project_async, ProjectSnapshot};
@@ -67,7 +68,10 @@ pub struct RecorderApp {
     // GUI state, not visible to audio threads
     pub selected_segment:  Option<usize>,
     pub trim_amount:       f32,
-    pub silence_secs:      f32, // silent segs
+    pub silence_secs:      f32,
+    // Shared cancel flag. Set to true to interrupt playback immediately.
+    // Reset to false at the start of every new play call.
+    pub stop_playback:     Arc<AtomicBool>,
     pub show_keybindings:  bool,
     pub show_settings:     bool,
     pub theme:             gui::ThemeKind,
@@ -89,6 +93,7 @@ impl RecorderApp {
             selected_segment:  None,
             trim_amount:       0.10,
             silence_secs:      1.0,
+            stop_playback:     Arc::new(AtomicBool::new(false)),
             show_keybindings:  false,
             show_settings:     false,
             theme,
@@ -107,7 +112,10 @@ impl RecorderApp {
             let seg_clone = seg.clone();
             let sample_rate = rec.project.sample_rate;
             drop(rec);
-            play_segment_async(seg_clone, sample_rate, self.recorder.clone(), || {});
+            // reset the stop flag before every new playback call
+            self.stop_playback.store(false, Ordering::Relaxed);
+            play_segment_async(seg_clone, sample_rate, self.recorder.clone(),
+                self.stop_playback.clone(), || {});
         }
     }
 
@@ -131,7 +139,9 @@ impl RecorderApp {
             // is_silence: false this is always a short preview clip, not a silence placeholder
             let preview_seg = Segment { samples: preview_samples, is_silence: false };
             drop(rec);
-            play_segment_async(preview_seg, sr, self.recorder.clone(), || {});
+            self.stop_playback.store(false, Ordering::Relaxed);
+            play_segment_async(preview_seg, sr, self.recorder.clone(),
+                self.stop_playback.clone(), || {});
         }
     }
 
@@ -194,7 +204,9 @@ impl RecorderApp {
                     let seg_clone = seg.clone();
                     let sample_rate = rec.project.sample_rate;
                     drop(rec);
-                    play_segment_async(seg_clone, sample_rate, self.recorder.clone(), || {});
+                    self.stop_playback.store(false, Ordering::Relaxed);
+                    play_segment_async(seg_clone, sample_rate, self.recorder.clone(),
+                        self.stop_playback.clone(), || {});
                 }
             }
 
@@ -205,7 +217,16 @@ impl RecorderApp {
 
                 let snapshot = ProjectSnapshot::from_project(&rec.project);
                 drop(rec);
-                play_project_async(snapshot, self.recorder.clone(), || {});
+                self.stop_playback.store(false, Ordering::Relaxed);
+                play_project_async(snapshot, self.recorder.clone(),
+                    self.stop_playback.clone(), || {});
+            }
+
+            // Set the stop flag — the polling loop in the audio thread sees it
+            // within ~50ms and drops the player, silencing output immediately.
+            // PlaybackState is reset to Idle by the audio thread's on_done path.
+            Command::StopPlayback => {
+                self.stop_playback.store(true, Ordering::Relaxed);
             }
 
             Command::Export(custom_path) => {
@@ -325,6 +346,8 @@ fn run_cli() {
         match parts[0] {
             "r"  => app.handle_command(Command::StartRecording),
             "s"  => app.handle_command(Command::StopRecording),
+            // "stop" in CLI stops playback (not "s" which stops recording)
+            "stop" => app.handle_command(Command::StopPlayback),
             "c"  => app.handle_command(Command::Approve),
             "x"  => app.handle_command(Command::Reject),
             "t"  => app.handle_command(Command::RetryCurrentTake),

@@ -76,6 +76,9 @@ pub enum Command {
     InsertSilenceAfter(usize, f32),
     // Add `seconds` of extra silence to an existing silence segment at the given index.
     ExpandSilence(usize, f32),
+    // Signals the audio thread to stop playback immediately.
+    // Handled in main.rs (sets the AtomicBool stop flag); dispatch_command no-ops it.
+    StopPlayback,
     Undo,
     Redo,
     Export(Option<String>), // None = use auto-path, Some = use explicit path
@@ -615,6 +618,7 @@ pub fn dispatch_command(rec: &mut RecorderState, cmd: Command) {
         Command::TrimEnd(idx, secs)       => { rec.trim_end(idx, secs); }
         Command::InsertSilenceAfter(i, s) => { rec.save_state(); rec.insert_silence_after(i, s); }
         Command::ExpandSilence(i, s)      => { rec.save_state(); rec.expand_silence(i, s); }
+        Command::StopPlayback             => {} // handled in main.rs via AtomicBool
         Command::Undo                     => { rec.undo(); }
         Command::Redo                     => { rec.redo(); }
         _ => {}

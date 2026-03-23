@@ -1,21 +1,25 @@
 use rodio::{DeviceSinkBuilder, Player, buffer::SamplesBuffer};
 use std::num::{NonZeroU16, NonZeroU32}; // positive channel and sample_rate
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use crate::state::{Segment, Project, PlaybackState};
 
-// For output, spawn a thread to do the playback. When it finishes,
-// it sets playback_state back to Idle so the UI can react.
+// For output, spawn a thread to do the playback. When it finishes
+// (either naturally or via stop_flag), it sets playback_state back
+// to Idle so the UI can react.
 //
-// The recorder Arc is passed in so the thread can:
-//   1. set PlaybackState::Playing before starting
-//   2. set PlaybackState::Idle when done
-//   3. call ctx.request_repaint() so egui redraws (passed as callback)
-//
+// stop_flag is an Arc<AtomicBool> shared with RecorderApp.
+// Setting it to true causes the polling loop below to exit early,
+// which drops `player` and immediately silences the device.
+// RecorderApp resets it to false before every new playback call.
+
 pub fn play_segment_async(
     segment: Segment,
     sample_rate: u32,
     recorder: Arc<Mutex<crate::state::RecorderState>>,
-    on_done: impl Fn() + Send + 'static // callback after playback finished
+    stop_flag: Arc<AtomicBool>,
+    on_done: impl Fn() + Send + 'static,
 ) {
     // set as playing before spawning to disable input
     {
@@ -34,12 +38,17 @@ pub fn play_segment_async(
         let rate = NonZeroU32::new(sample_rate).unwrap();
         let source = SamplesBuffer::new(channels, rate, segment.samples); // copy of audio segment
 
-        player.append(source); // add samplesbuffer to player for playback
-        player.sleep_until_end(); // blocking until playback finished (safe since new thread)
+        player.append(source);
 
-        //playback is finished at this point
+        // Poll until audio ends naturally or stop_flag fires.
+        // Dropping `player` when the flag fires cuts audio immediately.
+        while !player.is_paused() && !stop_flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(player); // silence device immediately on early stop
+
         if let Ok(mut rec) = recorder.lock() {
-            rec.playback_state = PlaybackState::Idle; 
+            rec.playback_state = PlaybackState::Idle;
         }
         on_done(); // callback, update UI
     });
@@ -48,6 +57,7 @@ pub fn play_segment_async(
 pub fn play_project_async(
     project_snapshot: ProjectSnapshot, // copy of whole project
     recorder: Arc<Mutex<crate::state::RecorderState>>,
+    stop_flag: Arc<AtomicBool>,
     on_done: impl Fn() + Send + 'static,
 ) {
     {
@@ -82,7 +92,12 @@ pub fn play_project_async(
 
         let source = SamplesBuffer::new(channels, rate, all_samples);
         player.append(source);
-        player.sleep_until_end();
+
+        // Same polling loop — honours stop_flag for both segment and project playback.
+        while !player.is_paused() && !stop_flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(player);
 
         if let Ok(mut rec) = recorder.lock() {
             rec.playback_state = PlaybackState::Idle;

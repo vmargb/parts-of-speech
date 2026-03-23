@@ -340,35 +340,53 @@ impl RecorderApp {
 
             ui.add_space(16.0);
 
-            // ── Primary row: RECORD  STOP  PLAY  CONFIRM  REJECT ─────────────
+            // -- Primary row ---------------------------------------------------
+            // during playback a STOP PLAYBACK button replaces the
+            // greyed-out controls so the user always can stop playback
+            // the buttons are still allocated (so layout doesn't jump)
             ui.horizontal(|ui| {
                 let gap = 8.0_f32;
                 let w   = ((ui.available_width() - gap * 4.0) / 5.0).max(1.0);
                 let h   = 48.0_f32;
 
-                self.transport_btn(ui, ctx, "RECORD", w, h,
-                    state_str == "idle" && !is_playing, p.rec,
-                    || self.handle_command(Command::StartRecording));
-                ui.add_space(gap);
-                self.transport_btn(ui, ctx, "STOP", w, h,
-                    state_str == "recording", p.muted,
-                    || self.handle_command(Command::StopRecording));
-                ui.add_space(gap);
-                let listen_lbl = if state_str == "reviewing" { "LISTEN" } else { "PLAY" };
-                self.transport_btn(ui, ctx, listen_lbl, w, h,
-                    !is_playing && (state_str == "reviewing" || seg_count > 0), p.play,
-                    || {
-                        if state_str == "reviewing" { self.play_current_segment(); }
-                        else if seg_count > 0 { self.handle_command(Command::PlaySegment(seg_count - 1)); }
-                    });
-                ui.add_space(gap);
-                self.transport_btn(ui, ctx, "CONFIRM", w, h,
-                    state_str == "reviewing" && !is_playing, p.play,
-                    || self.handle_command(Command::Approve));
-                ui.add_space(gap);
-                self.transport_btn(ui, ctx, "REJECT", w, h,
-                    state_str == "reviewing" && !is_playing, p.rec,
-                    || self.handle_command(Command::Reject));
+                if is_playing {
+                    // left two slots: dimmed placeholders
+                    self.transport_btn(ui, ctx, "RECORD",  w, h, false, p.rec,  || {});
+                    ui.add_space(gap);
+                    self.transport_btn(ui, ctx, "STOP",    w, h, false, p.muted, || {});
+                    ui.add_space(gap);
+                    // centre slot: the actual stop-playback button
+                    self.transport_btn(ui, ctx, "■ STOP PLAYBACK", w, h, true, p.amber,
+                        || self.handle_command(Command::StopPlayback));
+                    ui.add_space(gap);
+                    self.transport_btn(ui, ctx, "CONFIRM", w, h, false, p.play,  || {});
+                    ui.add_space(gap);
+                    self.transport_btn(ui, ctx, "REJECT",  w, h, false, p.rec,   || {});
+                } else {
+                    self.transport_btn(ui, ctx, "RECORD", w, h,
+                        state_str == "idle", p.rec,
+                        || self.handle_command(Command::StartRecording));
+                    ui.add_space(gap);
+                    self.transport_btn(ui, ctx, "STOP", w, h,
+                        state_str == "recording", p.muted,
+                        || self.handle_command(Command::StopRecording));
+                    ui.add_space(gap);
+                    let listen_lbl = if state_str == "reviewing" { "LISTEN" } else { "PLAY" };
+                    self.transport_btn(ui, ctx, listen_lbl, w, h,
+                        state_str == "reviewing" || seg_count > 0, p.play,
+                        || {
+                            if state_str == "reviewing" { self.play_current_segment(); }
+                            else if seg_count > 0 { self.handle_command(Command::PlaySegment(seg_count - 1)); }
+                        });
+                    ui.add_space(gap);
+                    self.transport_btn(ui, ctx, "CONFIRM", w, h,
+                        state_str == "reviewing", p.play,
+                        || self.handle_command(Command::Approve));
+                    ui.add_space(gap);
+                    self.transport_btn(ui, ctx, "REJECT", w, h,
+                        state_str == "reviewing", p.rec,
+                        || self.handle_command(Command::Reject));
+                }
             });
 
             ui.add_space(8.0);
@@ -383,10 +401,13 @@ impl RecorderApp {
                     state_str == "reviewing" && !is_playing, p.muted,
                     || self.handle_command(Command::RetryCurrentTake));
                 ui.add_space(gap);
+                // PLAY ALL is disabled while already playing (can't stack playback)
+                // but not blocked by any other state
                 self.transport_btn(ui, ctx, "PLAY ALL", w, h,
                     seg_count > 0 && !is_playing && state_str == "idle", p.muted,
                     || self.handle_command(Command::PlayAll));
                 ui.add_space(gap);
+                // Undo/redo remain blocked during playback — they mutate project data
                 self.transport_btn(ui, ctx, "<< UNDO", w, h,
                     can_undo && state_str == "idle" && !is_playing, p.muted,
                     || self.handle_command(Command::Undo));
@@ -649,14 +670,13 @@ impl RecorderApp {
             let row2_rect = Rect::from_min_size(Pos2::new(panel_x, sep_y + 34.0), Vec2::new(panel_w, 24.0));
 
             if is_silence {
-                // ── SILENCE expand panel ────────────────────────────────────
+                // -- SILENCE expand panel ------------------------------------
                 //
                 // Row 1: EXPAND controls + TRIM controls side-by-side.
                 //   Expanding adds more zeros to the end; trimming removes from
-                //   either end — both work identically to their audio counterparts.
+                //   either end both work identically to their audio counterparts.
                 //
-                // Row 2: Duration readout only (no preview — silence is silent).
-
+                // Row 2: Duration readout only 
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row1_rect), |ui| {
                     ui.horizontal(|ui| {
                         // ── Expand section ────────────────────────────────────
@@ -684,7 +704,7 @@ impl RecorderApp {
                             ctx.request_repaint();
                         }
 
-                        // ── Visual divider ───────────────────────────────────
+                        // -- Visual divider -----------------------------------
                         ui.add_space(10.0);
                         let divider_rect = ui.painter().clip_rect();
                         let dx = ui.next_widget_position().x;
@@ -694,7 +714,7 @@ impl RecorderApp {
                             Stroke::new(1.0, p.border));
                         ui.add_space(10.0);
 
-                        // ── Trim section ─────────────────────────────────────
+                        // -- Trim section -------------------------------------
                         ui.label(RichText::new("TRIM").font(FontId::monospace(8.0)).color(p.dim));
                         ui.add_space(4.0);
                         ui.add(egui::DragValue::new(&mut self.trim_amount)
@@ -744,7 +764,7 @@ impl RecorderApp {
                 });
 
             } else {
-                // ── Normal (audio) segment expand panel ──────────────────────
+                // -- Normal (audio) segment expand panel ----------------------
                 //
                 // Row 1: TRIM amount + trim start/end buttons  (unchanged)
                 // Row 2: Duration + preview start/end + silence_secs DragValue + "+ silence after"
@@ -790,7 +810,7 @@ impl RecorderApp {
 
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row2_rect), |ui| {
                     ui.horizontal(|ui| {
-                        // live duration display — updates instantly after each trim
+                        // live duration display updates instantly after trim
                         let dm = (duration / 60.0) as u32;
                         let ds = duration % 60.0;
                         ui.label(RichText::new(format!("dur  {:02}:{:05.2}", dm, ds))
@@ -822,7 +842,7 @@ impl RecorderApp {
                             ui.add_space(4.0);
                         }
 
-                        // ── + silence after ───────────────────────────────────
+                        // -- + silence after -----------------------------------
                         // Inline shortcut: insert a silence segment after this take.
                         // Uses self.silence_secs so the user can tune the default in
                         // one place and apply it across multiple segments.
@@ -996,6 +1016,7 @@ impl RecorderApp {
                     let keys: &[(&str, &str, Color32)] = &[
                         ("R",                     "Start recording",             p.rec),
                         ("S",                     "Stop recording",              p.muted),
+                        ("Space",                 "Stop playback",               p.amber),
                         ("C",                     "Confirm / approve take",      p.play),
                         ("X",                     "Reject take",                 p.rec),
                         ("T",                     "Try again (re-record slot)",  p.amber),
@@ -1310,6 +1331,11 @@ impl RecorderApp {
 
             if i.key_pressed(egui::Key::R) && !ctrl && state_str == "idle" && !playing {
                 self.handle_command(Command::StartRecording);
+            }
+            // Space stops playback from anywhere — no state restriction needed
+            // since StopPlayback is a no-op when nothing is playing
+            if i.key_pressed(egui::Key::Space) && playing {
+                self.handle_command(Command::StopPlayback);
             }
             if i.key_pressed(egui::Key::S) && state_str == "recording" {
                 self.handle_command(Command::StopRecording);
