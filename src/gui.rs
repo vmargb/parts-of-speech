@@ -177,6 +177,25 @@ impl eframe::App for RecorderApp {
     }
 }
 
+// SeekKind is returned by draw_segment_row to signal what playback to trigger
+//
+// Kept in gui.rs because it is purely a GUI-internal signalling type
+// draw_segment_row passes one of these back to draw_segment_list (which owns
+// the mutable borrow of self) so that playback is started *after* the
+// ScrollArea has released its borrow.
+//
+//  EdgePreview(bool)  play trim_preview_secs from the start (true) or
+//                      end (false) of the segment, fired automatically
+//                      right after a trim so the user can hear the edit.
+//  SeekTo(f32)        play from `offset_secs` to the end of the segment,
+//                      fired when the user clicks or releases a drag on
+//                      the seek bar.
+#[derive(Clone, Copy)]
+pub enum SeekKind {
+    EdgePreview(bool), // true = from start, false = from end
+    SeekTo(f32),       // offset in seconds from the start of the segment
+}
+
 // -- Helpers -------------------------------------------------------------------
 fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
@@ -494,9 +513,9 @@ impl RecorderApp {
         let reserved_height  = 90.0;
         let scroll_height    = (available_height - reserved_height).max(100.0);
 
-        // collect any preview edge request from segment rows and execute it
+        // collect any preview/seek request from segment rows and execute it
         // after the scroll area is done (so the mutable borrow of self is released).
-        let mut preview_request: Option<(usize, bool)> = None;
+        let mut preview_request: Option<(usize, SeekKind)> = None;
 
         egui::ScrollArea::vertical()
             .max_height(scroll_height)
@@ -511,9 +530,12 @@ impl RecorderApp {
                 }
             });
 
-        // execute preview playback now that self is no longer doubly-borrowed
-        if let Some((idx, from_start)) = preview_request {
-            self.play_segment_edge(idx, from_start);
+        // execute preview/seek playback now that self is no longer doubly-borrowed
+        if let Some((idx, kind)) = preview_request {
+            match kind {
+                SeekKind::EdgePreview(from_start) => self.play_segment_edge(idx, from_start),
+                SeekKind::SeekTo(offset_secs)     => self.play_segment_from(idx, offset_secs, None),
+            }
         }
     }
 
@@ -521,20 +543,12 @@ impl RecorderApp {
     //
     // Silence segments render with a blue-tinted background, a "SILENCE" badge
     // instead of the sample-count, and a different expand panel:
-    //   • Row 1: EXPAND controls (add more silence) + TRIM controls
-    //   • Row 2: duration readout only  (no preview buttons — previewing silence
-    //            isn't useful)
-    //
-    // use ONE allocate_exact_size for the full row rect (advances the
-    // layout cursor), then ui.interact(sub_rect, unique_id, sense) for every
-    // interactive element. ui.interact does not advance the layout cursor, so
-    // multiple sub-regions can coexist without fighting over the same space.
     #[allow(clippy::too_many_arguments)]
     fn draw_segment_row(
         &mut self, ui: &mut egui::Ui, ctx: &egui::Context,
         idx: usize, samples: usize, duration: f32, is_silence: bool,
         is_playing: bool, is_idle: bool, is_selected: bool,
-    ) -> Option<(usize, bool)> {
+    ) -> Option<(usize, SeekKind)> {
         let p = &self.palette;
 
         // -- Layout constants --------------------------------------------------
@@ -652,11 +666,22 @@ impl RecorderApp {
 
         // -- toggle expand on info click (only if no button was clicked) -------
         if info_resp.clicked() && pending.is_none() && is_idle {
-            self.selected_segment = if is_selected { None } else { Some(idx) };
+            if is_selected {
+                self.selected_segment = None;
+            } else {
+                // expanding a new segment: reset the seek bar to the beginning
+                self.seek_offset_secs  = 0.0;
+                self.selected_segment  = Some(idx);
+            }
         }
 
         // -- trim panel (shown when expanded) ----------------------------------
-        let mut preview_edge: Option<bool> = None; // Some(true)=start, Some(false)=end
+        // SeekKind::EdgePreview fires automatically after a trim (so the user
+        // can hear the edit without clicking anything extra).
+        // SeekKind::SeekTo fires when the user clicks / releases a drag on
+        // the seek bar.  Both are bubbled up to draw_segment_list which
+        // executes the right playback call once the scroll-area borrow is gone.
+        let mut preview_edge: Option<SeekKind> = None;
 
         if is_selected {
             let sep_y = row_rect.min.y + main_h + 3.0;
@@ -679,7 +704,6 @@ impl RecorderApp {
                 // Row 2: Duration readout only 
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row1_rect), |ui| {
                     ui.horizontal(|ui| {
-                        // ── Expand section ────────────────────────────────────
                         ui.label(RichText::new("EXPAND").font(FontId::monospace(8.0)).color(p.blue));
                         ui.add_space(4.0);
                         ui.add(egui::DragValue::new(&mut self.silence_secs)
@@ -800,7 +824,7 @@ impl RecorderApp {
                                     Command::TrimEnd(Some(idx), ta)
                                 });
                                 // mark which edge was trimmed so we can auto-preview it
-                                preview_edge = Some(is_start);
+                                preview_edge = Some(SeekKind::EdgePreview(is_start));
                                 ctx.request_repaint();
                             }
                             ui.add_space(4.0);
@@ -816,30 +840,73 @@ impl RecorderApp {
                         ui.label(RichText::new(format!("dur  {:02}:{:05.2}", dm, ds))
                             .font(FontId::monospace(8.0)).color(p.dim));
 
-                        ui.add_space(14.0);
+                        ui.add_space(10.0);
 
                         let can_preview = is_idle && !is_playing;
-                        let preview_secs = self.settings.trim_preview_secs;
 
-                        for (lbl, from_start) in [
-                            (format!("▶ preview start ({:.0}s)", preview_secs), true),
-                            (format!("▶ preview end ({:.0}s)",   preview_secs), false),
-                        ] {
-                            let (pr, presp) = ui.allocate_exact_size(
-                                Vec2::new(110.0, 18.0),
-                                if can_preview { Sense::click() } else { Sense::hover() });
-                            let ph = presp.hovered() && can_preview;
-                            ui.painter().rect(pr, Rounding::same(3.0),
-                                if ph { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 28) } else { p.surf2 },
-                                Stroke::new(1.0, if ph { p.play } else { p.border }));
-                            ui.painter().text(pr.center(), egui::Align2::CENTER_CENTER,
-                                &lbl, FontId::monospace(7.0),
-                                if can_preview { p.play } else { p.muted });
-                            if presp.clicked() && can_preview {
-                                preview_edge = Some(from_start);
+                        // -- seek bar -------------------------------------------------
+                        // Width: fill everything between the duration label and the
+                        // silence controls on the right (DragValue + button + gaps).
+                        let silence_rhs = 6.0 + 54.0 + 4.0 + 84.0; // gaps + DragValue + button
+                        let seek_w = (ui.available_width() - silence_rhs - 4.0).max(60.0);
+
+                        let (seek_r, seek_resp) = ui.allocate_exact_size(
+                            Vec2::new(seek_w, 18.0),
+                            if can_preview { Sense::click_and_drag() } else { Sense::hover() });
+
+                        // background track
+                        let sh = seek_resp.hovered() && can_preview;
+                        ui.painter().rect(seek_r, Rounding::same(3.0),
+                            p.surf3,
+                            Stroke::new(1.0, if sh { p.bordbr } else { p.border }));
+
+                        // filled region up to seek position
+                        let seek_frac = if duration > 0.0 {
+                            (self.seek_offset_secs / duration).clamp(0.0, 1.0)
+                        } else { 0.0 };
+                        if seek_frac > 0.0 {
+                            let fill_r = Rect::from_min_size(
+                                seek_r.min,
+                                Vec2::new(seek_r.width() * seek_frac, seek_r.height()));
+                            ui.painter().rect_filled(fill_r, Rounding::same(3.0),
+                                Color32::from_rgba_unmultiplied(
+                                    p.play.r(), p.play.g(), p.play.b(), 38));
+                        }
+
+                        // playhead needle
+                        let needle_x = seek_r.min.x + seek_r.width() * seek_frac;
+                        ui.painter().line_segment(
+                            [Pos2::new(needle_x, seek_r.min.y + 2.0),
+                             Pos2::new(needle_x, seek_r.max.y - 2.0)],
+                            Stroke::new(1.5, if can_preview { p.play } else { p.muted }));
+
+                        // time label centred in the bar
+                        let sm = (self.seek_offset_secs / 60.0) as u32;
+                        let ss_seek = self.seek_offset_secs % 60.0;
+                        ui.painter().text(
+                            seek_r.center(), egui::Align2::CENTER_CENTER,
+                            format!("{:02}:{:04.1}", sm, ss_seek),
+                            FontId::monospace(7.0),
+                            if can_preview { p.dim } else { p.muted });
+
+                        // drag: update position live (no playback until release)
+                        if seek_resp.dragged() && can_preview {
+                            if let Some(pos) = seek_resp.interact_pointer_pos() {
+                                let frac = ((pos.x - seek_r.min.x) / seek_r.width())
+                                    .clamp(0.0, 1.0);
+                                self.seek_offset_secs = frac * duration;
                                 ctx.request_repaint();
                             }
-                            ui.add_space(4.0);
+                        }
+                        // click or drag-release: trigger playback from the new position
+                        if (seek_resp.drag_stopped() || seek_resp.clicked()) && can_preview {
+                            if let Some(pos) = seek_resp.interact_pointer_pos() {
+                                let frac = ((pos.x - seek_r.min.x) / seek_r.width())
+                                    .clamp(0.0, 1.0);
+                                self.seek_offset_secs = frac * duration;
+                            }
+                            preview_edge = Some(SeekKind::SeekTo(self.seek_offset_secs));
+                            ctx.request_repaint();
                         }
 
                         // -- + silence after -----------------------------------
@@ -875,10 +942,10 @@ impl RecorderApp {
         // execute trim/expand/silence command first, then signal playback of the edge preview
         if let Some(cmd) = pending { self.handle_command(cmd); }
 
-        // return the preview request to the caller (draw_segment_list) so it can
+        // return the preview/seek request to the caller (draw_segment_list) so it can
         // be executed after the scroll area releases its borrow of self.
-        if let Some(from_start) = preview_edge {
-            return Some((idx, from_start));
+        if let Some(kind) = preview_edge {
+            return Some((idx, kind));
         }
 
         None

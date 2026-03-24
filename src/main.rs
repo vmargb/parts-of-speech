@@ -13,7 +13,7 @@ use colored::*;
 
 // ** input **
 // Microphone -> audio_input.rs ->(samples only)
-// RecorderState.current.samples -> Approve → Project.segments
+// RecorderState.current.samples -> Approve -> Project.segments
 // -> export.rs → WAV
 // 
 // ** playback **
@@ -72,6 +72,9 @@ pub struct RecorderApp {
     // Shared cancel flag. Set to true to interrupt playback immediately.
     // Reset to false at the start of every new play call.
     pub stop_playback:     Arc<AtomicBool>,
+    // Position of the seek bar for the currently-expanded segment (seconds).
+    // Reset to 0.0 whenever a different segment is expanded.
+    pub seek_offset_secs:  f32,
     pub show_keybindings:  bool,
     pub show_settings:     bool,
     pub theme:             gui::ThemeKind,
@@ -94,6 +97,7 @@ impl RecorderApp {
             trim_amount:       0.10,
             silence_secs:      1.0,
             stop_playback:     Arc::new(AtomicBool::new(false)),
+            seek_offset_secs:  0.0,
             show_keybindings:  false,
             show_settings:     false,
             theme,
@@ -119,29 +123,48 @@ impl RecorderApp {
         }
     }
 
-    // Play only the first or last `trim_preview_secs` of a committed segment.
-    // Called after trimming so the user can immediately hear whether the edit
-    // landed correctly, without waiting through the whole clip.
-    pub fn play_segment_edge(&self, idx: usize, from_start: bool) {
+    // Play from any offset in a committed segment, optionally capped to max_secs.
+    //
+    // This is the single unified primitive that backs both the seek bar and the
+    // post-trim edge preview.  All the borrow-safety rules are the same as
+    // play_segment_edge: lock → clone samples → drop lock → spawn thread.
+    pub fn play_segment_from(&self, idx: usize, offset_secs: f32, max_secs: Option<f32>) {
         let rec = self.recorder.lock().unwrap();
         if rec.playback_state == PlaybackState::Playing { return; }
         if let Some(seg) = rec.project.segments.get(idx) {
             let sr = rec.project.sample_rate;
-            let preview_count = (self.settings.trim_preview_secs * sr as f32) as usize;
-            let preview_samples: Vec<f32> = if from_start {
-                // Hear the new beginning of the clip
-                seg.samples[..preview_count.min(seg.samples.len())].to_vec()
+            let offset_samples = (offset_secs * sr as f32) as usize;
+            let start = offset_samples.min(seg.samples.len());
+            let end = if let Some(max) = max_secs {
+                (start + (max * sr as f32) as usize).min(seg.samples.len())
             } else {
-                // Hear the new ending of the clip
-                let start = seg.samples.len().saturating_sub(preview_count);
-                seg.samples[start..].to_vec()
+                seg.samples.len()
             };
-            // is_silence: false this is always a short preview clip, not a silence placeholder
+            let preview_samples = seg.samples[start..end].to_vec();
+            if preview_samples.is_empty() { return; }
             let preview_seg = Segment { samples: preview_samples, is_silence: false };
             drop(rec);
             self.stop_playback.store(false, Ordering::Relaxed);
             play_segment_async(preview_seg, sr, self.recorder.clone(),
                 self.stop_playback.clone(), || {});
+        }
+    }
+
+    // Play only the first or last `trim_preview_secs` of a committed segment.
+    // Called after trimming so the user can immediately hear whether the edit
+    // landed correctly, without waiting through the whole clip.
+    pub fn play_segment_edge(&self, idx: usize, from_start: bool) {
+        // Peek at duration while holding the lock, then drop before playing.
+        let dur = {
+            let rec = self.recorder.lock().unwrap();
+            rec.project.segments.get(idx).map(|s| {
+                s.samples.len() as f32 / rec.project.sample_rate as f32
+            })
+        };
+        let preview_secs = self.settings.trim_preview_secs;
+        if let Some(dur) = dur {
+            let offset = if from_start { 0.0 } else { (dur - preview_secs).max(0.0) };
+            self.play_segment_from(idx, offset, Some(preview_secs));
         }
     }
 
