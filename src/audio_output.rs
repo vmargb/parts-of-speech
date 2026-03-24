@@ -42,7 +42,7 @@ pub fn play_segment_async(
 
         // Poll until audio ends naturally or stop_flag fires.
         // Dropping `player` when the flag fires cuts audio immediately.
-        while !player.is_paused() && !stop_flag.load(Ordering::Relaxed) {
+        while !player.empty() && !stop_flag.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
         }
         drop(player); // silence device immediately on early stop
@@ -93,8 +93,7 @@ pub fn play_project_async(
         let source = SamplesBuffer::new(channels, rate, all_samples);
         player.append(source);
 
-        // Same polling loop — honours stop_flag for both segment and project playback.
-        while !player.is_paused() && !stop_flag.load(Ordering::Relaxed) {
+        while !player.empty() && !stop_flag.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
         }
         drop(player);
