@@ -3,6 +3,7 @@ mod audio_input;
 mod audio_output;
 mod export;
 mod gui;
+mod themes;
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,8 +78,8 @@ pub struct RecorderApp {
     pub seek_offset_secs:  f32,
     pub show_keybindings:  bool,
     pub show_settings:     bool,
-    pub theme:             gui::ThemeKind,
-    pub palette:           gui::Palette,
+    pub theme:             themes::ThemeKind,
+    pub palette:           themes::Palette,
     pub settings:          AppSettings,
 }
 
@@ -88,8 +89,8 @@ impl RecorderApp {
         let recorder = Arc::new(Mutex::new(RecorderState::new(48000, 1)));
         let stream = audio_input::start_input_stream(recorder.clone(), on_new_data);
         stream.play().unwrap();
-        let theme = gui::ThemeKind::Dark;
-        let palette = gui::palette_for(&theme);
+        let theme = themes::ThemeKind::Dark;
+        let palette = themes::palette_for(&theme);
         Self {
             recorder,
             _stream: stream,

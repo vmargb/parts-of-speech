@@ -3,136 +3,7 @@ use eframe::egui::{
 };
 use crate::state::{AppState, PlaybackState, Command};
 use crate::RecorderApp;
-
-
-// -- Theme types -------------------------------------------------------------
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum ThemeKind {
-    Dark,
-    Peach,
-    ColdBlue,
-    Forest,
-    Midnight,
-}
-
-impl ThemeKind {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Dark     => "DARK",
-            Self::Peach    => "PEACH",
-            Self::ColdBlue => "ARCTIC",
-            Self::Forest   => "FOREST",
-            Self::Midnight => "MIDNIGHT",
-        }
-    }
-    pub fn all() -> &'static [ThemeKind] {
-        &[ThemeKind::Dark, ThemeKind::Peach, ThemeKind::ColdBlue,
-          ThemeKind::Forest, ThemeKind::Midnight]
-    }
-}
-
-pub struct Palette {
-    pub bg:     Color32,
-    pub surf:   Color32,
-    pub surf2:  Color32,
-    pub surf3:  Color32,
-    pub border: Color32,
-    pub bordbr: Color32,
-    pub rec:    Color32,
-    pub play:   Color32,
-    pub amber:  Color32,
-    pub blue:   Color32,
-    pub muted:  Color32,
-    pub text:   Color32,
-    pub dim:    Color32,
-    pub mono:   Color32,
-}
-
-pub fn palette_for(theme: &ThemeKind) -> Palette {
-    match theme {
-        ThemeKind::Dark => Palette {
-            bg:     Color32::from_rgb(11,  11,  15 ),
-            surf:   Color32::from_rgb(18,  18,  24 ),
-            surf2:  Color32::from_rgb(24,  24,  34 ),
-            surf3:  Color32::from_rgb(32,  32,  46 ),
-            border: Color32::from_rgb(40,  40,  58 ),
-            bordbr: Color32::from_rgb(60,  60,  84 ),
-            rec:    Color32::from_rgb(229, 72,  77 ),
-            play:   Color32::from_rgb(46,  204, 143),
-            amber:  Color32::from_rgb(245, 166, 35 ),
-            blue:   Color32::from_rgb(74,  144, 217),
-            muted:  Color32::from_rgb(72,  72,  100),
-            text:   Color32::from_rgb(237, 236, 233),
-            dim:    Color32::from_rgb(100, 98,  120),
-            mono:   Color32::from_rgb(148, 226, 199),
-        },
-        ThemeKind::Peach => Palette {
-            bg:     Color32::from_rgb(15,  10,  8  ),
-            surf:   Color32::from_rgb(25,  17,  13 ),
-            surf2:  Color32::from_rgb(36,  24,  18 ),
-            surf3:  Color32::from_rgb(48,  32,  24 ),
-            border: Color32::from_rgb(70,  46,  32 ),
-            bordbr: Color32::from_rgb(100, 68,  48 ),
-            rec:    Color32::from_rgb(218, 82,  64 ),
-            play:   Color32::from_rgb(200, 152, 76 ),
-            amber:  Color32::from_rgb(238, 172, 86 ),
-            blue:   Color32::from_rgb(108, 156, 210),
-            muted:  Color32::from_rgb(105, 72,  55 ),
-            text:   Color32::from_rgb(248, 234, 218),
-            dim:    Color32::from_rgb(148, 110, 86 ),
-            mono:   Color32::from_rgb(228, 192, 152),
-        },
-        ThemeKind::ColdBlue => Palette {
-            bg:     Color32::from_rgb(8,   12,  20 ),
-            surf:   Color32::from_rgb(11,  18,  32 ),
-            surf2:  Color32::from_rgb(15,  25,  46 ),
-            surf3:  Color32::from_rgb(20,  34,  62 ),
-            border: Color32::from_rgb(28,  46,  86 ),
-            bordbr: Color32::from_rgb(46,  74,  132),
-            rec:    Color32::from_rgb(215, 76,  96 ),
-            play:   Color32::from_rgb(54,  198, 198),
-            amber:  Color32::from_rgb(96,  178, 238),
-            blue:   Color32::from_rgb(76,  158, 255),
-            muted:  Color32::from_rgb(48,  76,  132),
-            text:   Color32::from_rgb(208, 224, 248),
-            dim:    Color32::from_rgb(78,  108, 164),
-            mono:   Color32::from_rgb(118, 208, 230),
-        },
-        ThemeKind::Forest => Palette {
-            bg:     Color32::from_rgb(8,   13,  10 ),
-            surf:   Color32::from_rgb(12,  20,  14 ),
-            surf2:  Color32::from_rgb(16,  28,  18 ),
-            surf3:  Color32::from_rgb(22,  38,  25 ),
-            border: Color32::from_rgb(30,  54,  33 ),
-            bordbr: Color32::from_rgb(46,  82,  50 ),
-            rec:    Color32::from_rgb(208, 78,  78 ),
-            play:   Color32::from_rgb(74,  198, 116),
-            amber:  Color32::from_rgb(198, 162, 58 ),
-            blue:   Color32::from_rgb(78,  158, 198),
-            muted:  Color32::from_rgb(52,  92,  60 ),
-            text:   Color32::from_rgb(212, 240, 218),
-            dim:    Color32::from_rgb(88,  132, 94 ),
-            mono:   Color32::from_rgb(128, 208, 146),
-        },
-        ThemeKind::Midnight => Palette {
-            bg:     Color32::from_rgb(10,  8,   18 ),
-            surf:   Color32::from_rgb(15,  12,  30 ),
-            surf2:  Color32::from_rgb(21,  16,  44 ),
-            surf3:  Color32::from_rgb(29,  22,  58 ),
-            border: Color32::from_rgb(46,  34,  84 ),
-            bordbr: Color32::from_rgb(70,  52,  126),
-            rec:    Color32::from_rgb(218, 68,  178),
-            play:   Color32::from_rgb(118, 98,  238),
-            amber:  Color32::from_rgb(178, 138, 255),
-            blue:   Color32::from_rgb(98,  158, 255),
-            muted:  Color32::from_rgb(78,  58,  118),
-            text:   Color32::from_rgb(228, 218, 248),
-            dim:    Color32::from_rgb(118, 98,  158),
-            mono:   Color32::from_rgb(158, 138, 255),
-        },
-    }
-}
+use crate::themes::{ThemeKind, palette_for};
 
 
 // -- eframe::App ---------------------------------------------------------------
@@ -1147,7 +1018,7 @@ impl RecorderApp {
                 if bg_resp.clicked() { self.show_settings = false; }
 
                 let card_w = 520.0_f32;
-                let card_h = (screen.height() - 60.0).min(440.0);
+                let card_h = (screen.height() - 60.0).min(540.0);
                 let card   = Rect::from_center_size(screen.center(), Vec2::new(card_w, card_h));
                 ui.painter().rect(card, Rounding::same(12.0), p.surf2, Stroke::new(1.0, p.bordbr));
 
@@ -1172,64 +1043,92 @@ impl RecorderApp {
                         .font(FontId::monospace(9.0)).color(p.dim).strong());
                     ui.add_space(8.0);
 
-                    // Theme swatches — one per ThemeKind
-                    ui.horizontal(|ui| {
-                        let swatch_w = 82.0_f32;
-                        let swatch_h = 68.0_f32;
-                        let swatch_gap = 8.0_f32;
+                    // Theme swatches — two rows: DARK (top) and LIGHT (bottom).
+                    // The closure is scoped so its immutable borrow of self.theme
+                    // is released before we write self.theme = t below.
+                    let swatch_w   = 82.0_f32;
+                    let swatch_h   = 62.0_f32;
+                    let swatch_gap = 8.0_f32;
 
-                        for kind in ThemeKind::all() {
-                            let tp = palette_for(kind); // palette for this swatch
-                            let is_active = &self.theme == kind;
+                    let (dark_click, light_click) = {
+                        // helper: draw one row of swatches, return clicked theme if any
+                        let draw_swatch_row = |ui: &mut egui::Ui, kinds: &[ThemeKind]| -> Option<ThemeKind> {
+                            let mut chosen = None;
+                            ui.horizontal(|ui| {
+                                for kind in kinds {
+                                    let tp        = palette_for(kind);
+                                    let is_active = &self.theme == kind;
 
-                            let (sw, sw_resp) = ui.allocate_exact_size(
-                                Vec2::new(swatch_w, swatch_h), Sense::click());
+                                    let (sw, sw_resp) = ui.allocate_exact_size(
+                                        Vec2::new(swatch_w, swatch_h), Sense::click());
 
-                            // swatch background
-                            ui.painter().rect(sw, Rounding::same(7.0),
-                                tp.surf,
-                                Stroke::new(if is_active { 2.0 } else { 1.0 },
-                                    if is_active { tp.play }
-                                    else if sw_resp.hovered() { tp.bordbr }
-                                    else { tp.border }));
+                                    // background card
+                                    ui.painter().rect(sw, Rounding::same(7.0), tp.surf,
+                                        Stroke::new(if is_active { 2.0 } else { 1.0 },
+                                            if is_active              { tp.play   }
+                                            else if sw_resp.hovered() { tp.bordbr }
+                                            else                      { tp.border }));
 
-                            // inner colour preview strips
-                            let strip_h = 10.0_f32;
-                            let strip_y = sw.min.y + 10.0;
-                            let strip_w = (swatch_w - 16.0) / 3.0;
-                            for (i, &col) in [tp.rec, tp.play, tp.amber].iter().enumerate() {
-                                let sx = sw.min.x + 8.0 + i as f32 * (strip_w + 2.0);
-                                let strip_rect = Rect::from_min_size(
-                                    Pos2::new(sx, strip_y),
-                                    Vec2::new(strip_w, strip_h));
-                                ui.painter().rect_filled(strip_rect, Rounding::same(2.0), col);
-                            }
+                                    // colour preview strips (rec / play / amber)
+                                    let strip_h = 10.0_f32;
+                                    let strip_y = sw.min.y + 10.0;
+                                    let strip_w = (swatch_w - 16.0) / 3.0;
+                                    for (i, &col) in [tp.rec, tp.play, tp.amber].iter().enumerate() {
+                                        let sx = sw.min.x + 8.0 + i as f32 * (strip_w + 2.0);
+                                        ui.painter().rect_filled(
+                                            Rect::from_min_size(Pos2::new(sx, strip_y),
+                                                Vec2::new(strip_w, strip_h)),
+                                            Rounding::same(2.0), col);
+                                    }
 
-                            // BG tone preview
-                            let bg_preview = Rect::from_min_size(
-                                Pos2::new(sw.min.x + 8.0, strip_y + strip_h + 4.0),
-                                Vec2::new(swatch_w - 16.0, 8.0));
-                            ui.painter().rect_filled(bg_preview, Rounding::same(2.0), tp.bg);
+                                    // BG tone bar
+                                    ui.painter().rect_filled(
+                                        Rect::from_min_size(
+                                            Pos2::new(sw.min.x + 8.0, strip_y + strip_h + 4.0),
+                                            Vec2::new(swatch_w - 16.0, 7.0)),
+                                        Rounding::same(2.0), tp.bg);
 
-                            // active check dot
-                            if is_active {
-                                let dot_pos = Pos2::new(sw.max.x - 10.0, sw.min.y + 10.0);
-                                ui.painter().circle_filled(dot_pos, 4.0, tp.play);
-                            }
+                                    // active indicator dot
+                                    if is_active {
+                                        ui.painter().circle_filled(
+                                            Pos2::new(sw.max.x - 10.0, sw.min.y + 10.0),
+                                            4.0, tp.play);
+                                    }
 
-                            // label
-                            ui.painter().text(
-                                Pos2::new(sw.center().x, sw.max.y - 12.0),
-                                egui::Align2::CENTER_CENTER,
-                                kind.label(), FontId::monospace(7.5),
-                                if is_active { tp.text } else { tp.dim });
+                                    // label
+                                    ui.painter().text(
+                                        Pos2::new(sw.center().x, sw.max.y - 11.0),
+                                        egui::Align2::CENTER_CENTER,
+                                        kind.label(), FontId::monospace(7.5),
+                                        if is_active { tp.text } else { tp.dim });
 
-                            if sw_resp.clicked() {
-                                self.theme = kind.clone();
-                            }
-                            ui.add_space(swatch_gap);
-                        }
-                    });
+                                    if sw_resp.clicked() { chosen = Some(kind.clone()); }
+                                    ui.add_space(swatch_gap);
+                                }
+                            });
+                            chosen
+                        };
+
+                        // ── Dark row ───────────────────────────────────────────
+                        ui.label(RichText::new("DARK")
+                            .font(FontId::monospace(8.0)).color(p.dim).strong());
+                        ui.add_space(4.0);
+                        let dc = draw_swatch_row(ui, ThemeKind::dark_themes());
+                        ui.add_space(8.0);
+
+                        // ── Light row ──────────────────────────────────────────
+                        ui.label(RichText::new("LIGHT")
+                            .font(FontId::monospace(8.0)).color(p.dim).strong());
+                        ui.add_space(4.0);
+                        let lc = draw_swatch_row(ui, ThemeKind::light_themes());
+
+                        (dc, lc)
+                    }; // closure dropped here — borrow on self.theme released
+
+                    // apply whichever swatch (if any) was clicked this frame
+                    if let Some(t) = dark_click.or(light_click) {
+                        self.theme = t;
+                    }
 
                     ui.add_space(14.0);
                     ui.add(egui::Separator::default());
