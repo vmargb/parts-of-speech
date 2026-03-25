@@ -154,17 +154,24 @@ impl eframe::App for RecorderApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.palette.bg))
             .show(ctx, |ui| {
-                let avail    = ui.available_width();
-                let side_pad = ((avail - 700.0) / 2.0).max(20.0);
+                let avail = ui.available_width();
+                
+                // safely max out at 960px on wide screens.
+                let max_width = 960.0;
+                let side_pad = ((avail - max_width) / 2.0).max(16.0);
+                
                 egui::Frame::none()
-                    .inner_margin(egui::Margin { left: side_pad, right: side_pad, top: 18.0, bottom: 16.0 })
+                    .inner_margin(egui::Margin { left: side_pad, right: side_pad + 55.0, top: 24.0, bottom: 20.0 })
                     .show(ui, |ui| {
+                        // all elements share the exact same width bounds intrinsically.
                         self.draw_header(ui, ctx);
-                        ui.add_space(16.0);
+                        ui.add_space(18.0);
                         self.draw_transport_card(ui, ctx);
-                        ui.add_space(14.0);
+                        
+                        ui.add_space(16.0);
                         self.draw_segment_list(ui, ctx);
-                        ui.add_space(12.0);
+                        ui.add_space(14.0);
+                        
                         self.draw_footer(ui, ctx);
                     });
                 if self.show_keybindings {
@@ -475,7 +482,7 @@ impl RecorderApp {
                 .map(|(i, s)| (i, s.samples.len(), s.duration_seconds(sr), s.is_silence))
                 .collect();
             (rec.get_segment_count(), ip, ii, td, meta)
-        }; //  mutex released here, drawing happens with no lock held
+        }; 
 
         let p = &self.palette;
 
@@ -513,8 +520,6 @@ impl RecorderApp {
         let reserved_height  = 90.0;
         let scroll_height    = (available_height - reserved_height).max(100.0);
 
-        // collect any preview/seek request from segment rows and execute it
-        // after the scroll area is done (so the mutable borrow of self is released).
         let mut preview_request: Option<(usize, SeekKind)> = None;
 
         egui::ScrollArea::vertical()
@@ -526,11 +531,11 @@ impl RecorderApp {
                     let req = self.draw_segment_row(ui, ctx, *idx, *n, *dur, *is_silence,
                                                     is_playing, is_idle, selected);
                     if let Some(edge) = req { preview_request = Some(edge); }
-                    ui.add_space(3.0);
+                    // FIX: slightly more space between rows
+                    ui.add_space(5.0); 
                 }
             });
 
-        // execute preview/seek playback now that self is no longer doubly-borrowed
         if let Some((idx, kind)) = preview_request {
             match kind {
                 SeekKind::EdgePreview(from_start) => self.play_segment_edge(idx, from_start),
@@ -540,9 +545,6 @@ impl RecorderApp {
     }
 
     // -- Segment row -----------------------------------------------------------
-    //
-    // Silence segments render with a blue-tinted background, a "SILENCE" badge
-    // instead of the sample-count, and a different expand panel:
     #[allow(clippy::too_many_arguments)]
     fn draw_segment_row(
         &mut self, ui: &mut egui::Ui, ctx: &egui::Context,
@@ -553,14 +555,16 @@ impl RecorderApp {
 
         // -- Layout constants --------------------------------------------------
         let row_w    = ui.available_width();
-        let main_h   = 42.0_f32;
-        // two rows trim controls + preview/duration row
-        let trim_h   = if is_selected { 64.0_f32 } else { 0.0 };
+        
+        let main_h   = 46.0_f32; 
+        
+        // expanded height is 78.0 to prevent internal elements from squashing downwards
+        let trim_h   = if is_selected { 78.0_f32 } else { 0.0 }; 
         let total_h  = main_h + trim_h;
-        let btn_w    = 50.0_f32;
-        let btn_h    = 26.0_f32;
-        let btn_gap  = 3.0_f32;
-        // silence rows omit RETRY (can't re-record silence)
+        
+        let btn_w    = 52.0_f32; 
+        let btn_h    = 28.0_f32; 
+        let btn_gap  = 4.0_f32;  
         let n_btns   = if is_idle && !is_playing { if is_silence { 3 } else { 4 } } else { 0 };
         let btns_total = if n_btns > 0 { n_btns as f32 * btn_w + (n_btns - 1) as f32 * btn_gap + 8.0 } else { 0.0 };
 
@@ -691,8 +695,10 @@ impl RecorderApp {
 
             let panel_x   = row_rect.min.x + 8.0;
             let panel_w   = (row_w - 16.0).max(10.0);
-            let row1_rect = Rect::from_min_size(Pos2::new(panel_x, sep_y + 4.0),  Vec2::new(panel_w, 26.0));
-            let row2_rect = Rect::from_min_size(Pos2::new(panel_x, sep_y + 34.0), Vec2::new(panel_w, 24.0));
+            
+            // spaced out internal components to utilize 78px height perfectly
+            let row1_rect = Rect::from_min_size(Pos2::new(panel_x, sep_y + 6.0),  Vec2::new(panel_w, 28.0));
+            let row2_rect = Rect::from_min_size(Pos2::new(panel_x, sep_y + 40.0), Vec2::new(panel_w, 28.0));
 
             if is_silence {
                 // -- SILENCE expand panel ------------------------------------
@@ -964,7 +970,13 @@ impl RecorderApp {
             )
         };
 
-        ui.horizontal(|ui| {
+        // using horizontal_wrapped makes sure the buttons safely drop to a new line 
+        // when the window is too small, rather than forcing the entire UI to stretch off-screen.
+        ui.horizontal_wrapped(|ui| {
+            // Apply standard spacing for wrapped items
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().item_spacing.y = 8.0;
+
             let can_interact = is_idle && !is_playing;
             let can_export = seg_count > 0 && can_interact;
 
@@ -995,7 +1007,6 @@ impl RecorderApp {
                     ctx.request_repaint();
                 }
             }
-            ui.add_space(8.0);
 
             let can_save = can_interact && current_save_path.is_some();
             if footer_btn(ui, "SAVE", can_save, 70.0) {
@@ -1004,7 +1015,6 @@ impl RecorderApp {
                     ctx.request_repaint();
                 }
             }
-            ui.add_space(8.0);
 
             if footer_btn(ui, "SAVE AS...", can_interact, 100.0) {
                 if let Some(path) = rfd::FileDialog::new()
@@ -1015,13 +1025,10 @@ impl RecorderApp {
                     ctx.request_repaint();
                 }
             }
-            ui.add_space(8.0);
 
             if footer_btn(ui, "EXPORT WAV", can_export, 110.0) {
                 let mut dialog = rfd::FileDialog::new().add_filter("WAV Audio", &["wav"]);
 
-                // prefer the explicit default export dir from settings, then
-                // fall back to the project's parent directory
                 let start_dir = self.settings.default_export_dir.clone()
                     .or_else(|| {
                         current_save_path.as_ref().and_then(|p| {
@@ -1039,11 +1046,10 @@ impl RecorderApp {
                 }
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("? for keybindings")
-                    .font(FontId::monospace(8.0))
-                    .color(Color32::from_rgba_unmultiplied(p.text.r(), p.text.g(), p.text.b(), 28)));
-            });
+            ui.add_space(4.0);
+            ui.label(RichText::new("? for keybindings")
+                .font(FontId::monospace(8.0))
+                .color(Color32::from_rgba_unmultiplied(p.text.r(), p.text.g(), p.text.b(), 28)));
         });
     }
 
