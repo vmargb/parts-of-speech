@@ -33,11 +33,9 @@ Install Rust with your package-manager or from [rustup.rs](https://rustup.rs)
 | Fedora          | `sudo dnf install alsa-lib-devel pkgconf`    |
 | Arch            | `sudo pacman -S alsa-lib pkgconf`            |
 
-**macOS**: Install Xcode Command Line Tools: `xcode-select --install`  
-*(Uses CoreAudio—no ALSA needed)*
+**macOS**: Install Xcode Command Line Tools: `xcode-select --install` *(Uses CoreAudio)*
 
-**Windows**: Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
-*(Uses WASAPI—no ALSA needed)*
+**Windows**: Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) *(Uses WASAPI)*
 
 ## Quick Start
 

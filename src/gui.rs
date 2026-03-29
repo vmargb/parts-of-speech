@@ -676,14 +676,20 @@ impl RecorderApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("TRIM").font(FontId::monospace(8.0)).color(p.dim));
                         ui.add_space(6.0);
-                        ui.add(egui::DragValue::new(&mut self.trim_amount)
-                            .range(0.0_f32..=60.0).speed(0.01).suffix(" s").fixed_decimals(2));
+                        // trim point is driven by the seek bar below — no manual entry needed.
+                        ui.label(RichText::new("use seek bar to set trim")
+                            .font(FontId::monospace(7.5)).color(p.muted));
                         ui.add_space(10.0);
-                        let ta = self.trim_amount;
-                        let can_trim = ta > 0.0 && is_idle && !is_playing;
-                        for (lbl, is_start) in [
-                            ("< trim start", true),
-                            ("trim end >",   false),
+
+                        let seek = self.seek_offset_secs;
+                        // each button is independently guarded: trim-start needs the
+                        // seek cursor to be past 0, trim-end needs it before the end.
+                        let can_trim_start = seek > 0.0 && is_idle && !is_playing;
+                        let can_trim_end   = seek < duration && is_idle && !is_playing;
+
+                        for (lbl, is_start, can_trim) in [
+                            ("< trim start", true,  can_trim_start),
+                            ("trim end >",   false, can_trim_end),
                         ] {
                             let (tr, tresp) = ui.allocate_exact_size(
                                 Vec2::new(76.0, 20.0),
@@ -696,9 +702,11 @@ impl RecorderApp {
                                 lbl, FontId::monospace(7.5), if can_trim { p.amber } else { p.muted });
                             if tresp.clicked() && can_trim {
                                 pending = Some(if is_start {
-                                    Command::TrimStart(Some(idx), ta)
+                                    // trim everything before the seek cursor
+                                    Command::TrimStart(Some(idx), seek)
                                 } else {
-                                    Command::TrimEnd(Some(idx), ta)
+                                    // trim everything after the seek cursor
+                                    Command::TrimEnd(Some(idx), duration - seek)
                                 });
                                 // mark which edge was trimmed so we can auto-preview it
                                 preview_edge = Some(SeekKind::EdgePreview(is_start));
