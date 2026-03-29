@@ -9,13 +9,23 @@ use crate::themes::{ThemeKind, palette_for};
 // -- eframe::App ---------------------------------------------------------------
 impl eframe::App for RecorderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Capture wall time once per frame so sub-widgets can read it without
+        // calling ctx.input() while holding any locks (deadlock prevention).
+        // This must happen before any lock is taken this frame.
+        self.frame_time = ctx.input(|i| i.time);
+
         {
             let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
-            if matches!(rec.state, AppState::Recording)
-                || rec.playback_state == PlaybackState::Playing
-            {
+            let is_playing_now = rec.playback_state == PlaybackState::Playing;
+            if matches!(rec.state, AppState::Recording) || is_playing_now {
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
             }
+            // Detect the Idle→Playing edge and stamp the wall-clock start time.
+            // Lock is dropped before any further ctx calls to avoid deadlocks.
+            if is_playing_now && !self.prev_is_playing {
+                self.playback_wall_start = self.frame_time;
+            }
+            self.prev_is_playing = is_playing_now;
         }
         // keep palette in sync with current theme (struct copy each frame)
         self.palette = palette_for(&self.theme);
@@ -409,8 +419,28 @@ impl RecorderApp {
 
         if let Some((idx, kind)) = preview_request {
             match kind {
-                SeekKind::EdgePreview(from_start) => self.play_segment_edge(idx, from_start),
-                SeekKind::SeekTo(offset_secs)     => self.play_segment_from(idx, offset_secs, None),
+                SeekKind::EdgePreview(from_start) => {
+                    let preview_secs = self.settings.trim_preview_secs;
+                    // Compute the offset play_segment_edge will use so the
+                    // progress bar starts from the same point.
+                    self.playback_display_offset = if from_start {
+                        0.0
+                    } else {
+                        // Re-read the (post-trim) duration for the from-end case.
+                        let dur = {
+                            let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
+                            rec.project.segments.get(idx)
+                                .map(|s| s.samples.len() as f32 / rec.project.sample_rate as f32)
+                                .unwrap_or(0.0)
+                        };
+                        (dur - preview_secs).max(0.0)
+                    };
+                    self.play_segment_edge(idx, from_start);
+                }
+                SeekKind::SeekTo(offset_secs) => {
+                    self.playback_display_offset = offset_secs;
+                    self.play_segment_from(idx, offset_secs, None);
+                }
             }
         }
     }
@@ -675,11 +705,11 @@ impl RecorderApp {
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row1_rect), |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("TRIM").font(FontId::monospace(8.0)).color(p.dim));
-                        ui.add_space(6.0);
-                        // trim point is driven by the seek bar below — no manual entry needed.
-                        ui.label(RichText::new("use seek bar to set trim")
-                            .font(FontId::monospace(7.5)).color(p.muted));
                         ui.add_space(10.0);
+                        // trim point is driven by the seek bar below — no manual entry needed.
+                        // ui.label(RichText::new("use seek bar to set trim point")
+                        //     .font(FontId::monospace(7.5)).color(p.muted));
+                        // ui.add_space(10.0);
 
                         let seek = self.seek_offset_secs;
                         // each button is independently guarded: trim-start needs the
@@ -702,10 +732,15 @@ impl RecorderApp {
                                 lbl, FontId::monospace(7.5), if can_trim { p.amber } else { p.muted });
                             if tresp.clicked() && can_trim {
                                 pending = Some(if is_start {
-                                    // trim everything before the seek cursor
+                                    // Trim start: reset seek to beginning so the user
+                                    // sees the new start and the edge preview plays from 0.
+                                    self.seek_offset_secs = 0.0;
                                     Command::TrimStart(Some(idx), seek)
                                 } else {
-                                    // trim everything after the seek cursor
+                                    // Trim end: park seek just before the new end so the
+                                    // bar shows roughly where the edge preview will start.
+                                    let preview_secs = self.settings.trim_preview_secs;
+                                    self.seek_offset_secs = (seek - preview_secs).max(0.0);
                                     Command::TrimEnd(Some(idx), duration - seek)
                                 });
                                 // mark which edge was trimmed so we can auto-preview it
@@ -745,7 +780,7 @@ impl RecorderApp {
                             p.surf3,
                             Stroke::new(1.0, if sh { p.bordbr } else { p.border }));
 
-                        // filled region up to seek position
+                        // filled region up to seek position (trim cursor)
                         let seek_frac = if duration > 0.0 {
                             (self.seek_offset_secs / duration).clamp(0.0, 1.0)
                         } else { 0.0 };
@@ -765,14 +800,53 @@ impl RecorderApp {
                              Pos2::new(needle_x, seek_r.max.y - 2.0)],
                             Stroke::new(1.5, if can_preview { p.play } else { p.muted }));
 
-                        // time label centred in the bar
-                        let sm = (self.seek_offset_secs / 60.0) as u32;
-                        let ss_seek = self.seek_offset_secs % 60.0;
+                        // -- playback progress overlay -----------------------------
+                        // Drawn on top of the trim cursor. Only visible for the
+                        // currently-expanded segment while audio is playing.
+                        // Uses wall-clock elapsed time + the start offset recorded
+                        // when playback began — no audio-thread polling needed.
+                        let playback_pos = if is_playing && self.selected_segment == Some(idx)
+                            && duration > 0.0
+                        {
+                            let elapsed = (self.frame_time - self.playback_wall_start) as f32;
+                            (self.playback_display_offset + elapsed).min(duration)
+                        } else {
+                            -1.0 // sentinel: don't draw
+                        };
+
+                        if playback_pos >= 0.0 {
+                            let pb_frac = (playback_pos / duration).clamp(0.0, 1.0);
+                            let pb_x = seek_r.min.x + seek_r.width() * pb_frac;
+
+                            // Amber fill behind the playhead so it reads against any bg
+                            let pb_fill = Rect::from_min_size(
+                                seek_r.min,
+                                Vec2::new(seek_r.width() * pb_frac, seek_r.height()));
+                            ui.painter().rect_filled(pb_fill, Rounding::same(3.0),
+                                Color32::from_rgba_unmultiplied(
+                                    p.amber.r(), p.amber.g(), p.amber.b(), 22));
+
+                            // Solid amber needle
+                            ui.painter().line_segment(
+                                [Pos2::new(pb_x, seek_r.min.y + 1.0),
+                                 Pos2::new(pb_x, seek_r.max.y - 1.0)],
+                                Stroke::new(2.0, p.amber));
+                        }
+
+                        // time label: show live playback position while playing,
+                        // seek cursor position otherwise. Colour matches the needle.
+                        let (display_secs, label_col) = if playback_pos >= 0.0 {
+                            (playback_pos, p.amber)
+                        } else {
+                            (self.seek_offset_secs, if can_preview { p.dim } else { p.muted })
+                        };
+                        let lm = (display_secs / 60.0) as u32;
+                        let ls = display_secs % 60.0;
                         ui.painter().text(
                             seek_r.center(), egui::Align2::CENTER_CENTER,
-                            format!("{:02}:{:04.1}", sm, ss_seek),
+                            format!("{:02}:{:04.1}", lm, ls),
                             FontId::monospace(7.0),
-                            if can_preview { p.dim } else { p.muted });
+                            label_col);
 
                         // drag: update position live (no playback until release)
                         if seek_resp.dragged() && can_preview {

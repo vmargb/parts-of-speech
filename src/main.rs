@@ -76,6 +76,16 @@ pub struct RecorderApp {
     // Position of the seek bar for the currently-expanded segment (seconds).
     // Reset to 0.0 whenever a different segment is expanded.
     pub seek_offset_secs:  f32,
+    // Playback progress tracking (GUI-side, time-based).
+    // frame_time is the egui wall-clock time captured once per frame so
+    // sub-widgets can read it without calling ctx.input() while holding locks.
+    pub frame_time:              f64,
+    // Wall time (egui seconds) at which the current play call started.
+    pub playback_wall_start:     f64,
+    // Offset within the segment (seconds) where the current play call began.
+    pub playback_display_offset: f32,
+    // Used to detect the Idle→Playing transition each frame.
+    pub prev_is_playing:         bool,
     pub show_keybindings:  bool,
     pub show_settings:     bool,
     pub theme:             themes::ThemeKind,
@@ -99,6 +109,10 @@ impl RecorderApp {
             silence_secs:      1.0,
             stop_playback:     Arc::new(AtomicBool::new(false)),
             seek_offset_secs:  0.0,
+            frame_time:              0.0,
+            playback_wall_start:     0.0,
+            playback_display_offset: 0.0,
+            prev_is_playing:         false,
             show_keybindings:  false,
             show_settings:     false,
             theme,
