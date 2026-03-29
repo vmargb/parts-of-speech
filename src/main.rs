@@ -86,6 +86,11 @@ pub struct RecorderApp {
     pub playback_display_offset: f32,
     // Used to detect the Idle→Playing transition each frame.
     pub prev_is_playing:         bool,
+    // When the user clicks the seek bar during playback we can't start a new
+    // play call immediately (because play_segment_from guards against it while Playing)
+    // instead stop playback and store the intent here update() drains it
+    // the next frame once the audio thread has actually gone Idle.
+    pub pending_seek:            Option<(usize, f32)>,
     pub show_keybindings:  bool,
     pub show_settings:     bool,
     pub theme:             themes::ThemeKind,
@@ -113,6 +118,7 @@ impl RecorderApp {
             playback_wall_start:     0.0,
             playback_display_offset: 0.0,
             prev_is_playing:         false,
+            pending_seek:            None,
             show_keybindings:  false,
             show_settings:     false,
             theme,

@@ -27,6 +27,24 @@ impl eframe::App for RecorderApp {
             }
             self.prev_is_playing = is_playing_now;
         }
+
+        // Drain a pending seek now that the audio thread has gone Idle.
+        // We must not hold the recorder lock while calling play_segment_from.
+        if let Some((seg_idx, offset)) = self.pending_seek.take() {
+            let is_idle_now = {
+                let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
+                rec.playback_state == PlaybackState::Idle
+            };
+            if is_idle_now {
+                self.playback_display_offset = offset;
+                self.play_segment_from(seg_idx, offset, None);
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            } else {
+                // Still stopping — put it back and wait one more frame.
+                self.pending_seek = Some((seg_idx, offset));
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            }
+        }
         // keep palette in sync with current theme (struct copy each frame)
         self.palette = palette_for(&self.theme);
         self.apply_theme(ctx);
@@ -587,6 +605,7 @@ impl RecorderApp {
         // the seek bar.  Both are bubbled up to draw_segment_list which
         // executes the right playback call once the scroll-area borrow is gone.
         let mut preview_edge: Option<SeekKind> = None;
+        let mut stop_and_seek: Option<f32> = None;
 
         if is_selected {
             let sep_y = row_rect.min.y + main_h + 3.0;
@@ -763,6 +782,11 @@ impl RecorderApp {
                         ui.add_space(10.0);
 
                         let can_preview = is_idle && !is_playing;
+                        // The seek bar stays interactive even during playback for the
+                        // currently-expanded segment so the user can re-seek without
+                        // first pressing Stop.
+                        let can_seek = can_preview
+                            || (is_playing && self.selected_segment == Some(idx));
 
                         // -- seek bar -------------------------------------------------
                         // Width: fill everything between the duration label and the
@@ -772,10 +796,10 @@ impl RecorderApp {
 
                         let (seek_r, seek_resp) = ui.allocate_exact_size(
                             Vec2::new(seek_w, 18.0),
-                            if can_preview { Sense::click_and_drag() } else { Sense::hover() });
+                            if can_seek { Sense::click_and_drag() } else { Sense::hover() });
 
                         // background track
-                        let sh = seek_resp.hovered() && can_preview;
+                        let sh = seek_resp.hovered() && can_seek;
                         ui.painter().rect(seek_r, Rounding::same(3.0),
                             p.surf3,
                             Stroke::new(1.0, if sh { p.bordbr } else { p.border }));
@@ -798,7 +822,7 @@ impl RecorderApp {
                         ui.painter().line_segment(
                             [Pos2::new(needle_x, seek_r.min.y + 2.0),
                              Pos2::new(needle_x, seek_r.max.y - 2.0)],
-                            Stroke::new(1.5, if can_preview { p.play } else { p.muted }));
+                            Stroke::new(1.5, if can_seek { p.play } else { p.muted }));
 
                         // -- playback progress overlay -----------------------------
                         // Drawn on top of the trim cursor. Only visible for the
@@ -838,7 +862,7 @@ impl RecorderApp {
                         let (display_secs, label_col) = if playback_pos >= 0.0 {
                             (playback_pos, p.amber)
                         } else {
-                            (self.seek_offset_secs, if can_preview { p.dim } else { p.muted })
+                            (self.seek_offset_secs, if can_seek { p.dim } else { p.muted })
                         };
                         let lm = (display_secs / 60.0) as u32;
                         let ls = display_secs % 60.0;
@@ -848,7 +872,9 @@ impl RecorderApp {
                             FontId::monospace(7.0),
                             label_col);
 
-                        // drag: update position live (no playback until release)
+                        // drag: update seek position live (no playback until release)
+                        // Only when not already playing dragging during playback
+                        // would fight the live progress needle.
                         if seek_resp.dragged() && can_preview {
                             if let Some(pos) = seek_resp.interact_pointer_pos() {
                                 let frac = ((pos.x - seek_r.min.x) / seek_r.width())
@@ -857,14 +883,21 @@ impl RecorderApp {
                                 ctx.request_repaint();
                             }
                         }
-                        // click or drag-release: trigger playback from the new position
-                        if (seek_resp.drag_stopped() || seek_resp.clicked()) && can_preview {
+                        // click or drag-release: start playback from the new position.
+                        // If audio is already playing, stop it and stash a pending seek;
+                        // update() will fire it the next frame once the thread goes Idle.
+                        if (seek_resp.drag_stopped() || seek_resp.clicked()) && can_seek {
                             if let Some(pos) = seek_resp.interact_pointer_pos() {
                                 let frac = ((pos.x - seek_r.min.x) / seek_r.width())
                                     .clamp(0.0, 1.0);
                                 self.seek_offset_secs = frac * duration;
                             }
-                            preview_edge = Some(SeekKind::SeekTo(self.seek_offset_secs));
+                            if is_playing {
+                                // Can't start a new play call while Playing — queue it.
+                                stop_and_seek = Some(self.seek_offset_secs);
+                            } else {
+                                preview_edge = Some(SeekKind::SeekTo(self.seek_offset_secs));
+                            }
                             ctx.request_repaint();
                         }
 
@@ -900,6 +933,14 @@ impl RecorderApp {
 
         // execute trim/expand/silence command first, then signal playback of the edge preview
         if let Some(cmd) = pending { self.handle_command(cmd); }
+
+        // stop_and_seek is set when the user clicks the seek bar during playback.
+        // self.handle_command can't be called inside the allocate_new_ui closure
+        // (p borrows self.palette there), so we drain it here once all borrows are gone.
+        if let Some(offset) = stop_and_seek {
+            self.handle_command(Command::StopPlayback);
+            self.pending_seek = Some((idx, offset));
+        }
 
         // return the preview/seek request to the caller (draw_segment_list) so it can
         // be executed after the scroll area releases its borrow of self.
