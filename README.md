@@ -21,6 +21,17 @@ You then just throw the exported output into Audacity(or preferred editor) and a
 
 ---
 
+## Quick Start
+Either download from [releases](https://github.com/vmargb/parts-of-speech/releases) or:
+
+**Compile from source**
+```bash
+git clone https://github.com/vmargb/parts-of-speech.git
+cd parts-of-speech
+cargo run
+```
+and `cargo run -- --cli` for the CLI version.
+
 ## Dependencies
 
 Install Rust with your package-manager or from [rustup.rs](https://rustup.rs)
@@ -37,14 +48,6 @@ Install Rust with your package-manager or from [rustup.rs](https://rustup.rs)
 
 **Windows**: Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) *(Uses WASAPI)*
 
-## Quick Start
-
-```bash
-git clone https://github.com/vmargb/parts-of-speech.git
-cd parts-of-speech
-cargo run
-```
-and `cargo run -- --gui` for the GUI version.
 
 ---
 
