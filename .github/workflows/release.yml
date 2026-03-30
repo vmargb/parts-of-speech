@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'   # triggers on new tag
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false   # don't cancel other platforms if one fails
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: parts-of-speech
+            asset:    parts-of-speech-linux-x64
+
+          - os: windows-latest
+            artifact: parts-of-speech.exe
+            asset:    parts-of-speech-windows-x64.exe
+
+          # macos-latest: Apple Silicon (M-series)
+          - os: macos-latest
+            artifact: parts-of-speech
+            asset:    parts-of-speech-macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ALSA dependencies (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Build release binary
+        run: cargo build --release
+
+      # Rename to the platform-suffixed asset name before uploading
+      # shell: bash works on all three platforms (Windows runners have Git Bash).
+      - name: Rename binary
+        shell: bash
+        run: mv target/release/${{ matrix.artifact }} target/release/${{ matrix.asset }}
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/release/${{ matrix.asset }}
+          # mark pre-releases automatically for tags like v1.0.0-beta
+          prerelease: ${{ contains(github.ref, '-') }}

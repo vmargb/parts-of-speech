@@ -555,9 +555,9 @@ fn run_cli() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.contains(&"--gui".to_string()) {
-        run_gui();
-    } else {
+    if args.contains(&"--cli".to_string()) {
         run_cli();
+    } else {
+        run_gui();
     }
 }
