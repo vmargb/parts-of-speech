@@ -122,25 +122,66 @@ fn lighten(c: Color32, amt: u8) -> Color32 {
     )
 }
 
+// Slightly tint a color toward black
+fn darken(c: Color32, amt: u8) -> Color32 {
+    Color32::from_rgb(
+        c.r().saturating_sub(amt),
+        c.g().saturating_sub(amt),
+        c.b().saturating_sub(amt),
+    )
+}
+
+// Produce a ghosted/inactive color that works on both dark and light backgrounds.
+// On dark backgrounds (sum < 384) we lighten; on light backgrounds we darken.
+// This prevents inactive header buttons from becoming invisible white-on-white.
+fn ghost_inactive(bg: Color32, amt: u8) -> Color32 {
+    let lum = bg.r() as u16 + bg.g() as u16 + bg.b() as u16;
+    if lum > 384 { darken(bg, amt) } else { lighten(bg, amt) }
+}
+
 
 // -- RecorderApp impl ----------------------------------------------------------
 impl RecorderApp {
-
     fn apply_theme(&self, ctx: &egui::Context) {
         let p = &self.palette;
-        let mut v = ctx.style().visuals.clone();
-        v.panel_fill                       = p.bg;
-        v.window_fill                      = p.surf;
-        v.extreme_bg_color                 = p.surf2;
-        v.widgets.noninteractive.bg_fill   = p.surf2;
-        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.dim);
-        v.widgets.inactive.bg_fill         = p.surf2;
-        v.widgets.inactive.fg_stroke       = Stroke::new(1.0, p.text);
-        v.widgets.hovered.bg_fill          = p.surf3;
-        v.widgets.active.bg_fill           = p.surf3;
-        v.selection.bg_fill                = Color32::from_rgba_unmultiplied(
+
+        // detect if in a light theme by checking background brightness
+        // If R+G+B > 384 (approx midpoint of 0-765), treat it as light
+        let is_light = (p.bg.r() as u16 + p.bg.g() as u16 + p.bg.b() as u16) > 384;
+        // start with a fresh base visual state matching the themes brightness then adjsut
+        let mut v = if is_light {
+            egui::Visuals::light()
+        } else {
+            egui::Visuals::dark()
+        };
+        // base assignments
+        v.panel_fill = p.bg;
+        v.window_fill = p.surf;
+        v.extreme_bg_color = p.surf2;
+
+        if is_light {
+            v.widgets.noninteractive.bg_fill = p.surf3; 
+            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+        } else {
+            v.widgets.noninteractive.bg_fill = p.surf2;
+            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.dim);
+        }
+
+        // consistent for both themes
+        v.widgets.inactive.bg_fill = p.surf2;
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+
+        v.widgets.hovered.bg_fill = p.surf3;
+        v.widgets.hovered.fg_stroke = Stroke::new(1.5, p.text);
+
+        v.widgets.active.bg_fill = p.surf3;
+        v.widgets.active.fg_stroke = Stroke::new(2.0, p.text);
+
+        v.selection.bg_fill = Color32::from_rgba_unmultiplied(
             p.play.r(), p.play.g(), p.play.b(), 40);
-        v.override_text_color              = Some(p.text);
+
+        v.override_text_color = Some(p.text);
+
         ctx.set_visuals(v);
     }
 
@@ -161,7 +202,7 @@ impl RecorderApp {
                 let (gear_r, gear_resp) = ui.allocate_exact_size(Vec2::new(52.0, 16.0), Sense::click());
                 let gear_hov = gear_resp.hovered();
                 let gear_col = if self.show_settings { amber }
-                    else if gear_hov { dim } else { lighten(self.palette.bg, 32) };
+                    else if gear_hov { dim } else { ghost_inactive(self.palette.bg, 38) };
                 ui.painter().text(gear_r.center(), egui::Align2::CENTER_CENTER,
                     "⚙ settings", FontId::monospace(9.0), gear_col);
                 if gear_resp.clicked() {
@@ -171,7 +212,7 @@ impl RecorderApp {
                 ui.add_space(10.0);
                 let (kb_r, kb_resp) = ui.allocate_exact_size(Vec2::new(40.0, 16.0), Sense::click());
                 let kb_col = if self.show_keybindings { mono }
-                    else if kb_resp.hovered() { dim } else { lighten(self.palette.bg, 32) };
+                    else if kb_resp.hovered() { dim } else { ghost_inactive(self.palette.bg, 38) };
                 ui.painter().text(kb_r.center(), egui::Align2::CENTER_CENTER,
                     "? help", FontId::monospace(9.0), kb_col);
                 if kb_resp.clicked() {
@@ -497,10 +538,7 @@ impl RecorderApp {
         let bg = if is_silence {
             if is_selected { blend(silence_base, p.blue, 0.10) } else { silence_base }
         } else if is_selected { blend(p.surf, p.blue, 0.07) } else {
-            Color32::from_rgb(
-                p.bg.r().saturating_add(5),
-                p.bg.g().saturating_add(5),
-                p.bg.b().saturating_add(7))
+            p.surf
         };
         let border_col = if is_silence {
             if is_selected { blend(p.border, p.blue, 0.70) } else { blend(p.border, p.blue, 0.40) }

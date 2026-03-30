@@ -162,7 +162,7 @@ pub fn palette_for(theme: &ThemeKind) -> Palette {
         },
 
         // -- Light themes -------------------------------------------------------
-        // Light: clean neutral — mirrors Dark
+        // Light: clean neutral: mirrors Dark
 
         ThemeKind::Light => Palette {
             bg:     Color32::from_rgb(238, 238, 245),
@@ -175,13 +175,13 @@ pub fn palette_for(theme: &ThemeKind) -> Palette {
             play:   Color32::from_rgb(28,  158, 108),
             amber:  Color32::from_rgb(175, 118, 18 ),
             blue:   Color32::from_rgb(50,  108, 188),
-            muted:  Color32::from_rgb(155, 155, 185),
+            muted:  Color32::from_rgb(112, 110, 148),
             text:   Color32::from_rgb(28,  28,  48 ),
-            dim:    Color32::from_rgb(100, 98,  128),
+            dim:    Color32::from_rgb(88,  86,  115),
             mono:   Color32::from_rgb(28,  152, 122),
         },
 
-        // Blossom: warm cream — mirrors Peach
+        // Blossom: warm cream: mirrors Peach
 
         ThemeKind::Blossom => Palette {
             bg:     Color32::from_rgb(255, 248, 242),
@@ -194,13 +194,13 @@ pub fn palette_for(theme: &ThemeKind) -> Palette {
             play:   Color32::from_rgb(162, 112, 38 ),
             amber:  Color32::from_rgb(190, 128, 28 ),
             blue:   Color32::from_rgb(68,  118, 182),
-            muted:  Color32::from_rgb(188, 158, 135),
+            muted:  Color32::from_rgb(145, 108, 85 ),
             text:   Color32::from_rgb(58,  32,  18 ),
-            dim:    Color32::from_rgb(138, 102, 80 ),
+            dim:    Color32::from_rgb(108, 72,  52 ),
             mono:   Color32::from_rgb(168, 128, 72 ),
         },
 
-        // Glacier: pale sky — mirrors Arctic/ColdBlue
+        // Glacier: pale sky: mirrors Arctic/ColdBlue
 
         ThemeKind::Glacier => Palette {
             bg:     Color32::from_rgb(238, 245, 255),
@@ -213,13 +213,13 @@ pub fn palette_for(theme: &ThemeKind) -> Palette {
             play:   Color32::from_rgb(28,  150, 158),
             amber:  Color32::from_rgb(42,  128, 195),
             blue:   Color32::from_rgb(36,  105, 205),
-            muted:  Color32::from_rgb(148, 172, 215),
+            muted:  Color32::from_rgb(88,  122, 182),
             text:   Color32::from_rgb(14,  28,  62 ),
-            dim:    Color32::from_rgb(68,  98,  155),
+            dim:    Color32::from_rgb(58,  88,  148),
             mono:   Color32::from_rgb(25,  148, 172),
         },
 
-        // Meadow: pale sage — mirrors Forest
+        // Meadow: pale sage: mirrors Forest
 
         ThemeKind::Meadow => Palette {
             bg:     Color32::from_rgb(238, 248, 238),
@@ -232,13 +232,13 @@ pub fn palette_for(theme: &ThemeKind) -> Palette {
             play:   Color32::from_rgb(38,  148, 72 ),
             amber:  Color32::from_rgb(148, 118, 22 ),
             blue:   Color32::from_rgb(38,  118, 162),
-            muted:  Color32::from_rgb(148, 182, 155),
+            muted:  Color32::from_rgb(88,  128, 96 ),
             text:   Color32::from_rgb(18,  48,  22 ),
-            dim:    Color32::from_rgb(72,  118, 78 ),
+            dim:    Color32::from_rgb(58,  105, 65 ),
             mono:   Color32::from_rgb(32,  148, 70 ),
         },
 
-        // Dusk: pale lavender — mirrors Midnight
+        // Dusk: pale lavender: mirrors Midnight
 
         ThemeKind::Dusk => Palette {
             bg:     Color32::from_rgb(245, 240, 255),
@@ -251,9 +251,9 @@ pub fn palette_for(theme: &ThemeKind) -> Palette {
             play:   Color32::from_rgb(85,  58,  195),
             amber:  Color32::from_rgb(138, 95,  218),
             blue:   Color32::from_rgb(55,  108, 210),
-            muted:  Color32::from_rgb(172, 158, 212),
+            muted:  Color32::from_rgb(112, 92,  172),
             text:   Color32::from_rgb(28,  14,  62 ),
-            dim:    Color32::from_rgb(98,  75,  148),
+            dim:    Color32::from_rgb(88,  65,  138),
             mono:   Color32::from_rgb(95,  75,  205),
         },
     }
