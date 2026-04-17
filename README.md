@@ -1,5 +1,6 @@
 >**Talkback** is the term for when a producer or engineer communicates with a musician in the recording booth, typically via headphones, to give immediate feedback on a take like approving it as good or directing a redo with specific advice.
 
+
 This tool is designed for situations where you need to record long-form content like narration, podcasts, or voice-overs without the pressure of getting everything perfect in a single continuous take, similar to being in a 'recording booth' at a studio:
 
 <p align="center">
@@ -14,9 +15,9 @@ This tool is designed for situations where you need to record long-form content 
 
 ## The problem this solves
 
-Traditional recording software forces you to choose between two frustrating workflows: either record everything in one giant file and edit out the mistakes later(which can take hours), or stop and start and edit the recording repeatedly, which becomes tedious. This project offers a middle path. You record in short segments, review each one immediately, and decide on the spot whether to keep or redo the segment(including previous takes) with a single keypress. The good takes get appended to your project automatically. No need to mess around with the audio timeline.
+Traditional recording software forces you to choose between two frustrating workflows: either record everything in one giant file and edit out the mistakes later(which can take hours), or repeatedly stop and start and edit the recording repeatedly, which becomes tedious. This project offers a middle path. You record in short segments, review each one immediately, and decide on the spot whether to keep or redo the segment(including previous takes) with a single keypress. The good takes get appended to your project automatically. No need to mess around with the audio timeline.
 
-You then just throw the exported output into Audacity(or preferred editor) and apply your effects in one go without further editing.
+You then just throw the exported output into your preferred editor and apply your effects in one go without further editing.
 
 
 ---
@@ -34,7 +35,7 @@ and `cargo run -- --cli` for the CLI version.
 
 ## Dependencies
 
-Install Rust with your package-manager or from [rustup.rs](https://rustup.rs)
+If compiling from source, install Rust with your package-manager or from [rustup.rs](https://rustup.rs)
 
 **Linux**: Install ALSA development libraries (required for audio):
 
@@ -48,6 +49,15 @@ Install Rust with your package-manager or from [rustup.rs](https://rustup.rs)
 
 **Windows**: Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) *(Uses WASAPI)*
 
+
+---
+
+## What about `noise-reduction`, `noise-gate`, `eq` etc.?
+Parts of Speech is not intended to replace existing audio editors. Instead,
+it is a **workflow** tool that lets you get the audio *right*, before
+you drop it into something like Audacity. This creates a clear separation of concerns:
+- Parts of speech: Complete your voice over
+- Audacity/Audition: Apply effects
 
 ---
 
