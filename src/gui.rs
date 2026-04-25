@@ -40,7 +40,7 @@ impl eframe::App for RecorderApp {
                 self.play_segment_from(seg_idx, offset, None);
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
             } else {
-                // Still stopping — put it back and wait one more frame.
+                // Still stopping put it back and wait one more frame
                 self.pending_seek = Some((seg_idx, offset));
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
@@ -48,6 +48,9 @@ impl eframe::App for RecorderApp {
         // keep palette in sync with current theme (struct copy each frame)
         self.palette = palette_for(&self.theme);
         self.apply_theme(ctx);
+        // Refresh waveform peak caches before any drawing.
+        // Uses try_lock internally safe to call here with no locks held.
+        self.update_waveform_caches();
         self.handle_keyboard(ctx);
 
         egui::CentralPanel::default()
@@ -84,7 +87,6 @@ impl eframe::App for RecorderApp {
 }
 
 // SeekKind is returned by draw_segment_row to signal what playback to trigger
-//
 // Kept in gui.rs because it is purely a GUI-internal signalling type
 // draw_segment_row passes one of these back to draw_segment_list (which owns
 // the mutable borrow of self) so that playback is started *after* the
@@ -252,7 +254,7 @@ impl RecorderApp {
     }
 
     // -- Transport Card --------------------------------------------------------
-    fn draw_transport_card(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn draw_transport_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (state_str, is_playing, seg_count, cur_samples, sample_rate, can_undo, can_redo) = {
             let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
             let s = match &rec.state {
@@ -302,6 +304,55 @@ impl RecorderApp {
                     _ => "press RECORD to begin".into(),
                 };
                 ui.label(RichText::new(sub).font(FontId::monospace(10.0)).color(p.dim));
+
+                // -- Live waveform -------------------------------------------
+                // Only rendered while Recording or Reviewing (has sample data)
+                // Peaks are pre-computed in update_waveform_caches() so just
+                // read self.live_peaks here (VecDeque<f32> owned by RecorderApp)
+                // no shared state, so no locks or clones
+                if !self.live_peaks.is_empty() && state_str != "idle" {
+                    ui.add_space(6.0);
+                    let wf_h = 38.0_f32;
+                    let (wf_rect, _) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), wf_h),
+                        Sense::hover(),
+                    );
+
+                    // red for REC, amber for REVIEW
+                    let wf_col = if state_str == "recording" { p.rec } else { p.amber };
+                    let n = self.live_peaks.len();
+                    let bar_w = wf_rect.width() / n as f32;
+                    let cy = wf_rect.center().y;
+                    let half_h = wf_h * 0.46;
+
+                    for (i, &peak) in self.live_peaks.iter().enumerate() {
+                        let x = wf_rect.min.x + i as f32 * bar_w;
+                        // map linear amplitude to dB scale for display,
+                        // similar to other how DAWs render waveforms
+                        // -60 dB floor: 0.0,  0 dB (full scale): 1.0
+                        // Quiet audio that sits around -30 dB
+                        // maps to around 0.5, giving a clearly visible bar instead
+                        let display = if peak < 1e-6 { 0.0_f32 } else {
+                            ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+                        };
+                        // minimum bar height of 1.5 px so silent buckets still
+                        // leave a faint baseline
+                        let bar_h = (display * half_h * 2.0).max(1.5);
+                        let bar_rect = Rect::from_center_size(
+                            Pos2::new(x + bar_w * 0.5, cy),
+                            Vec2::new((bar_w - 0.8).max(0.5), bar_h),
+                        );
+                        // alpha also tracks the dB-scaled value so quiet passages
+                        // are translucent and loud peaks are more opaque.
+                        let alpha = ((display * 180.0) + 40.0).min(255.0) as u8;
+                        ui.painter().rect_filled(
+                            bar_rect,
+                            Rounding::ZERO,
+                            Color32::from_rgba_unmultiplied(
+                                wf_col.r(), wf_col.g(), wf_col.b(), alpha),
+                        );
+                    }
+                }
             });
 
             ui.add_space(16.0);
@@ -841,6 +892,43 @@ impl RecorderApp {
                         ui.painter().rect(seek_r, Rounding::same(3.0),
                             p.surf3,
                             Stroke::new(1.0, if sh { p.bordbr } else { p.border }));
+
+                        // Waveform (drawn over bg, under fill & needle)
+                        // Reads self.waveform_cache which holds pre-computed
+                        // peaks from update_waveform_caches()
+                        // skipped for silence segments (since all zeros, no useful shape)
+                        if !is_silence {
+                            if let Some((_, peaks)) = self.waveform_cache.get(&idx) {
+                                let n = peaks.len();
+                                if n > 0 {
+                                    let bar_w = seek_r.width() / n as f32;
+                                    let cy    = seek_r.center().y;
+                                    // use slightly less than full half-height so there's
+                                    // a thin margin at the top and bottom of the track
+                                    let half_h = seek_r.height() * 0.43;
+                                    for (i, &peak) in peaks.iter().enumerate() {
+                                        let x = seek_r.min.x + i as f32 * bar_w;
+                                        // same dB scaling as the live waveform
+                                        let display = if peak < 1e-6 { 0.0_f32 } else {
+                                            ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+                                        };
+                                        let bar_h = (display * half_h * 2.0).max(1.0);
+                                        let bar_rect = Rect::from_center_size(
+                                            Pos2::new(x + bar_w * 0.5, cy),
+                                            Vec2::new((bar_w - 0.5).max(0.5), bar_h),
+                                        );
+                                        // subtle teal at 65/255 alpha visible but doesn't
+                                        // compete with the trim fill or the playhead needle
+                                        ui.painter().rect_filled(
+                                            bar_rect,
+                                            Rounding::ZERO,
+                                            Color32::from_rgba_unmultiplied(
+                                                p.mono.r(), p.mono.g(), p.mono.b(), 65),
+                                        );
+                                    }
+                                }
+                            }
+                        }
 
                         // filled region up to seek position (trim cursor)
                         let seek_frac = if duration > 0.0 {

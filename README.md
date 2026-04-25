@@ -3,6 +3,8 @@
 
 This tool is designed for situations where you need to record long-form content like narration, podcasts, or voice-overs without the pressure of getting everything perfect in a single continuous take, similar to being in a 'recording booth' at a studio:
 
+---
+
 <p align="center">
     <img src="screenshots/demo1.png" alt="Full app demo" width="100%" />
 </p>
@@ -58,6 +60,9 @@ it is a **workflow** tool that lets you get the audio *right*, before
 you drop it into something like Audacity. This creates a clear separation of concerns:
 - Parts of speech: Complete your voice over
 - Audacity/Audition: Apply effects
+
+However, if some basic noise-reduction is strongly desired, then I may
+consider implementing it in a future update.
 
 ---
 

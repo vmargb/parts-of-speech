@@ -5,10 +5,11 @@ mod export;
 mod gui;
 mod themes;
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use cpal::traits::StreamTrait;
-use state::{RecorderState, Command, dispatch_command, PlaybackState, Segment};
+use state::{AppState, RecorderState, Command, dispatch_command, PlaybackState, Segment};
 use audio_output::{play_segment_async, play_project_async, ProjectSnapshot};
 use colored::*;
 
@@ -96,6 +97,18 @@ pub struct RecorderApp {
     pub theme:             themes::ThemeKind,
     pub palette:           themes::Palette,
     pub settings:          AppSettings,
+    // waveform_cache: per-committed-segment peak data (GUI owned, never shared with audio thread)
+    pub waveform_cache: HashMap<usize, (usize, Vec<f32>)>,
+    // live waveform for the current recording incremental / O(new samples only)
+    // live_peaks is a VecDeque of peak values, one per BUCKET_SAMPLES samples
+    // At most MAX_LIVE_BUCKETS entries.  Oldest bucket falls/scrolls off
+    // the left as recording progresses
+    // live_sample_cursor: how many samples from current.samples have already
+    // been committed into buckets.  Each update, clone ONLY the slice
+    // [live_sample_cursor..], which is always small (~50 ms of audio)
+    // which keeps the clone O(new data) instead of O(total recording length)
+    pub live_peaks:         VecDeque<f32>,
+    pub live_sample_cursor: usize,
 }
 
 impl RecorderApp {
@@ -124,6 +137,9 @@ impl RecorderApp {
             theme,
             palette,
             settings:          AppSettings::default(),
+            waveform_cache:    HashMap::new(),
+            live_peaks:        VecDeque::new(),
+            live_sample_cursor: 0,
         }
     }
 
@@ -148,7 +164,6 @@ impl RecorderApp {
     //
     // This is the single unified primitive that backs both the seek bar and the
     // post-trim edge preview.  All the borrow-safety rules are the same as
-    // play_segment_edge: lock → clone samples → drop lock → spawn thread.
     pub fn play_segment_from(&self, idx: usize, offset_secs: f32, max_secs: Option<f32>) {
         let rec = self.recorder.lock().unwrap();
         if rec.playback_state == PlaybackState::Playing { return; }
@@ -304,6 +319,146 @@ impl RecorderApp {
             }
 
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Waveform helpers
+// ---------------------------------------------------------------------------
+
+/// Reduce samples to num_buckets peak-absolute values in [0.0, 1.0]
+/// Uses the maximum absolute value in each bucket so quiet passages show as
+/// low bars and loud peaks show tall useful for spotting where to trim
+pub fn compute_waveform_peaks(samples: &[f32], num_buckets: usize) -> Vec<f32> {
+    if samples.is_empty() || num_buckets == 0 {
+        return vec![0.0; num_buckets];
+    }
+    // integer division: how many raw samples map to one display bucket
+    // the last bucket may cover fewer samples which is fine for display
+    let bucket_size = (samples.len() / num_buckets).max(1);
+    (0..num_buckets).map(|i| {
+        let start = i * bucket_size;
+        let end   = ((i + 1) * bucket_size).min(samples.len());
+        if start >= samples.len() { return 0.0_f32; }
+        // Peak absolute value in this bucket
+        samples[start..end]
+            .iter()
+            .fold(0.0_f32, |acc, &s| acc.max(s.abs()))
+            .clamp(0.0, 1.0)
+    }).collect()
+}
+
+impl RecorderApp {
+    /// Called once per frame from `update()` before any drawing.
+    ///
+    /// Live waveform incremental, O(new samples only):
+    ///   Each call clones only `current.samples[live_sample_cursor..]` — the
+    ///   samples that arrived since the last bucket was committed.  That slice
+    ///   is bounded to one bucket width (~2 400 samples / 50 ms) regardless of
+    ///   how long the take has been running, so cost is constant over time.
+    ///   Processed samples are bucketed into `live_peaks` (VecDeque) and
+    ///   `live_sample_cursor` advances.  Partial final chunks are left for the
+    ///   next frame they never get re-cloned, just extended.
+    ///
+    /// Segment waveforms invalidated by sample-count change only:
+    ///   project.segments is only mutated by GUI-thread commands, so the clone
+    ///   here is safe.  Peaks are cached until a trim / delete / approve changes
+    ///   the segment, at which point the cache entry is recomputed once.
+    ///
+    /// Lock discipline: `try_lock` exactly once, snapshot all needed data as
+    /// owned values, drop the lock, do all CPU work with no locks held.
+    /// If the audio thread holds the lock this frame is skipped silently.
+    pub fn update_waveform_caches(&mut self) {
+        // One display bucket = this many input samples.
+        // At 48 kHz: 2 400 samps = 50 ms.  At 44.1 kHz: ~54 ms.  Fine either way.
+        // Keeping this small means we commit a new bucket very frequently, giving
+        // a smooth real-time display without ever cloning more than ~19 KB.
+        const BUCKET_SAMPLES:   usize = 2_400;
+        const MAX_LIVE_BUCKETS: usize = 200; // ~10 s of scrolling history at 50 ms/bucket
+        const SEG_BUCKETS:      usize = 200;
+
+        // ── Single non-blocking lock acquisition ────────────────────────────
+        let snapshot = match self.recorder.try_lock() {
+            Ok(rec) => {
+                let is_active = matches!(rec.state,
+                    AppState::Recording | AppState::Reviewing);
+
+                // Clone ONLY the unprocessed tail of current.samples.
+                // This slice is at most ~BUCKET_SAMPLES long in the steady state
+                // because we advance live_sample_cursor after every full bucket.
+                let new_tail: Option<Vec<f32>> = if is_active {
+                    rec.current.as_ref().and_then(|seg| {
+                        let cur_len = seg.samples.len();
+                        if cur_len > self.live_sample_cursor {
+                            // to_vec() copies only [cursor..end] — bounded clone.
+                            Some(seg.samples[self.live_sample_cursor..].to_vec())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+
+                // Stale segment caches — same approach as before.
+                let seg_updates: Vec<(usize, usize, Vec<f32>)> = rec.project.segments
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, seg)| {
+                        let cached = self.waveform_cache.get(&idx).map(|(n, _)| *n);
+                        let cur    = seg.samples.len();
+                        if cached != Some(cur) {
+                            Some((idx, cur, seg.samples.clone()))
+                        } else { None }
+                    })
+                    .collect();
+
+                let seg_count = rec.project.segments.len();
+                Some((is_active, new_tail, seg_updates, seg_count))
+            }
+            // Audio thread has the lock — skip this frame, zero audio impact.
+            Err(_) => None,
+        };
+        // Lock is dropped here ── all work below operates on owned data ──────
+
+        let Some((is_active, new_tail, seg_updates, seg_count)) = snapshot
+        else { return; };
+
+        // ── Live waveform ─────────────────────────────────────────────────
+        if !is_active {
+            // State left recording/reviewing — reset for next take.
+            if !self.live_peaks.is_empty() {
+                self.live_peaks.clear();
+                self.live_sample_cursor = 0;
+            }
+        } else if let Some(tail) = new_tail {
+            // Bucket the new tail samples.  Only full BUCKET_SAMPLES chunks are
+            // committed; a partial final chunk waits until next frame.
+            // This means live_sample_cursor always points at a bucket boundary,
+            // so the clone next frame picks up exactly where we left off.
+            for chunk in tail.chunks(BUCKET_SAMPLES) {
+                if chunk.len() < BUCKET_SAMPLES {
+                    break; // partial — leave for next frame
+                }
+                let peak = chunk.iter()
+                    .fold(0.0_f32, |acc, &s| acc.max(s.abs()))
+                    .clamp(0.0, 1.0);
+                self.live_peaks.push_back(peak);
+                if self.live_peaks.len() > MAX_LIVE_BUCKETS {
+                    self.live_peaks.pop_front(); // scroll: oldest falls off left
+                }
+                self.live_sample_cursor += BUCKET_SAMPLES;
+            }
+        }
+
+        // ── Segment caches ────────────────────────────────────────────────
+        for (idx, sample_count, samples) in seg_updates {
+            let peaks = compute_waveform_peaks(&samples, SEG_BUCKETS);
+            self.waveform_cache.insert(idx, (sample_count, peaks));
+        }
+
+        // Evict entries whose index no longer exists (segment was deleted / project cleared).
+        self.waveform_cache.retain(|&k, _| k < seg_count);
     }
 }
 
