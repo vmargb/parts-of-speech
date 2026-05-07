@@ -61,20 +61,21 @@ impl eframe::App for RecorderApp {
                 // safely max out at 960px on wide screens.
                 let max_width = 960.0;
                 let side_pad = ((avail - max_width) / 2.0).max(16.0);
-                
                 egui::Frame::none()
                     .inner_margin(egui::Margin { left: side_pad, right: side_pad + 55.0, top: 24.0, bottom: 20.0 })
                     .show(ui, |ui| {
                         // all elements share the exact same width bounds intrinsically.
                         self.draw_header(ui, ctx);
                         ui.add_space(18.0);
-                        self.draw_transport_card(ui, ctx);
-                        
-                        ui.add_space(16.0);
-                        self.draw_segment_list(ui, ctx);
-                        ui.add_space(14.0);
-                        
-                        self.draw_footer(ui, ctx);
+                        if self.minimal_mode {
+                            self.draw_minimal_mode(ui, ctx);
+                        } else { // advanced layout
+                            self.draw_transport_card(ui, ctx);
+                            ui.add_space(16.0);
+                            self.draw_segment_list(ui, ctx);
+                            ui.add_space(14.0);
+                            self.draw_footer(ui, ctx);
+                        }
                     });
                 if self.show_keybindings {
                     self.draw_keybindings_overlay(ctx);
@@ -215,12 +216,33 @@ impl RecorderApp {
                 let (kb_r, kb_resp) = ui.allocate_exact_size(Vec2::new(40.0, 16.0), Sense::click());
                 let kb_col = if self.show_keybindings { mono }
                     else if kb_resp.hovered() { dim } else { ghost_inactive(self.palette.bg, 38) };
+                // keybinds
                 ui.painter().text(kb_r.center(), egui::Align2::CENTER_CENTER,
                     "? help", FontId::monospace(9.0), kb_col);
                 if kb_resp.clicked() {
                     self.show_keybindings = !self.show_keybindings;
                     self.show_settings = false;
                 }
+
+                // mode toggle
+                let (mode_r, mode_resp) = ui.allocate_exact_size(
+                    Vec2::new(46.0, 16.0),
+                    Sense::click(),
+                );
+                let mode_label = if self.minimal_mode { "⬛ min" } else { "⬜ adv" };
+                let mode_col = if mode_resp.hovered() { dim } else { ghost_inactive(self.palette.bg, 38) };
+                ui.painter().text(
+                    mode_r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    mode_label,
+                    FontId::monospace(9.0),
+                    mode_col,
+                );
+                if mode_resp.clicked() {
+                    self.minimal_mode = !self.minimal_mode;
+                }
+
+                // status badge
                 ui.add_space(10.0);
                 self.draw_status_badge(ui);
             });
@@ -1586,6 +1608,226 @@ impl RecorderApp {
                 && state_str == "idle" && !playing
             {
                 self.handle_command(Command::Redo);
+            }
+        });
+    }
+
+    fn draw_minimal_mode(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        let p = &self.palette;
+
+        // snapshot state (lock & drop)
+        let (state_str, is_playing, cur_samples, sample_rate) = {
+            let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
+            let s = match &rec.state {
+                AppState::Idle      => "idle",
+                AppState::Recording => "recording",
+                AppState::Reviewing => "reviewing",
+            };
+            let ip = rec.playback_state == PlaybackState::Playing;
+            let cs = rec.current.as_ref().map(|c| c.samples.len()).unwrap_or(0);
+            (s, ip, cs, rec.project.sample_rate)
+        };
+
+        let secs = cur_samples as f32 / sample_rate.max(1) as f32;
+        let timer_str = if state_str != "idle" {
+            format!(
+                "{:02}:{:02}.{:02}",
+                (secs / 60.0) as u32,
+                (secs % 60.0) as u32,
+                ((secs % 1.0) * 100.0) as u32
+            )
+        } else {
+            "00:00.00".into()
+        };
+
+        ui.vertical_centered(|ui| {
+            ui.add_space(48.0);
+
+            // Timer
+            let timer_color = match state_str {
+                "recording"               => p.rec,
+                "reviewing" if is_playing => p.amber,
+                "reviewing"               => p.text,
+                _                         => p.dim,
+            };
+            ui.label(
+                RichText::new(&timer_str)
+                    .font(FontId::monospace(64.0))
+                    .color(timer_color),
+            );
+
+            ui.add_space(10.0);
+
+            // Status hint
+            let hint = match state_str {
+                "recording"               => "S to stop",
+                "reviewing" if is_playing => "playing back ...",
+                "reviewing"               => "C confirm  ·  X reject  ·  T retry",
+                _                         => "R to record",
+            };
+            ui.label(
+                RichText::new(hint)
+                    .font(FontId::monospace(10.0))
+                    .color(p.dim),
+            );
+
+            ui.add_space(28.0);
+
+            // Waveform slot, painted only when there is data
+            let wf_h = 54.0_f32;
+            let (wf_rect, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), wf_h),
+                Sense::hover(),
+            );
+
+            if !self.live_peaks.is_empty() && state_str != "idle" {
+                let wf_color = if state_str == "recording" { p.rec } else { p.amber };
+                let n       = self.live_peaks.len();
+                let bar_w   = wf_rect.width() / n as f32;
+                let cy      = wf_rect.center().y;
+                let half_h  = wf_h * 0.46;
+
+                for (i, &peak) in self.live_peaks.iter().enumerate() {
+                    let x       = wf_rect.min.x + i as f32 * bar_w;
+                    let display = if peak < 1e-6 {
+                        0.0
+                    } else {
+                        ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+                    };
+                    let bar_h   = (display * half_h * 2.0).max(1.5);
+                    let bar_rect = Rect::from_center_size(
+                        Pos2::new(x + bar_w * 0.5, cy),
+                        Vec2::new((bar_w - 0.8).max(0.5), bar_h),
+                    );
+                    let alpha = ((display * 180.0) + 40.0).min(255.0) as u8;
+                    ui.painter().rect_filled(
+                        bar_rect,
+                        Rounding::ZERO,
+                        Color32::from_rgba_unmultiplied(
+                            wf_color.r(), wf_color.g(), wf_color.b(), alpha,
+                        ),
+                    );
+                }
+            }
+
+            ui.add_space(32.0);
+
+            // primary action circle
+            let btn_size = 160.0_f32;
+            let (rect, resp) = ui.allocate_exact_size(
+                Vec2::new(btn_size, btn_size),
+                Sense::click(),
+            );
+            let hov = resp.hovered();
+
+            let (btn_label, btn_col, font_size) = match state_str {
+                "recording"               => ("STOP", p.rec,   22.0_f32),
+                "reviewing" if is_playing => ("■",    p.amber, 30.0),
+                "reviewing"               => ("▶",    p.play,  30.0),
+                _                         => ("REC",  p.rec,   26.0),
+            };
+
+            let fill = if hov {
+                Color32::from_rgba_unmultiplied(btn_col.r(), btn_col.g(), btn_col.b(), 38)
+            } else {
+                p.surf2
+            };
+            ui.painter().circle_filled(rect.center(), btn_size / 2.0, fill);
+            ui.painter().circle_stroke(
+                rect.center(),
+                btn_size / 2.0,
+                Stroke::new(2.0, if hov { btn_col } else { p.border }),
+            );
+            // Nudge the play triangle slightly right so it looks visually centred
+            let label_offset = if btn_label == "▶" { Vec2::new(3.0, 0.0) } else { Vec2::ZERO };
+            ui.painter().text(
+                rect.center() + label_offset,
+                egui::Align2::CENTER_CENTER,
+                btn_label,
+                FontId::monospace(font_size),
+                btn_col,
+            );
+
+            if resp.clicked() {
+                match state_str {
+                    "idle"      => self.handle_command(Command::StartRecording),
+                    "recording" => self.handle_command(Command::StopRecording),
+                    "reviewing" => {
+                        if is_playing { self.handle_command(Command::StopPlayback); }
+                        else          { self.play_current_segment(); }
+                    }
+                    _ => {}
+                }
+            }
+
+            ui.add_space(28.0);
+
+            // Review action row
+            let row_h = 44.0_f32;
+            let row_w = ui.available_width();
+            let (row_rect, _) = ui.allocate_exact_size(
+                Vec2::new(row_w, row_h),
+                Sense::hover(),
+            );
+
+            if state_str == "reviewing" && !is_playing {
+                let gap   = 8.0_f32;
+                let btn_w = (row_w - gap * 2.0) / 3.0;
+
+                // Reject
+                let reject_rect = Rect::from_min_size(
+                    row_rect.min,
+                    Vec2::new(btn_w, row_h),
+                );
+                let rr = ui.interact(reject_rect, ui.id().with("min_reject"), Sense::click());
+                let rh = rr.hovered();
+                ui.painter().rect(
+                    reject_rect, Rounding::same(8.0),
+                    if rh { Color32::from_rgba_unmultiplied(p.rec.r(), p.rec.g(), p.rec.b(), 22) }
+                    else  { Color32::TRANSPARENT },
+                    Stroke::new(1.0, if rh { p.rec } else { p.border }),
+                );
+                ui.painter().text(reject_rect.center(), egui::Align2::CENTER_CENTER,
+                    "✖  REJECT", FontId::monospace(11.0),
+                    if rh { p.rec } else { p.muted });
+
+                // Retry (centre)
+                let retry_rect = Rect::from_min_size(
+                    Pos2::new(row_rect.min.x + btn_w + gap, row_rect.min.y),
+                    Vec2::new(btn_w, row_h),
+                );
+                let tr = ui.interact(retry_rect, ui.id().with("min_retry"), Sense::click());
+                let th = tr.hovered();
+                ui.painter().rect(
+                    retry_rect, Rounding::same(8.0),
+                    if th { Color32::from_rgba_unmultiplied(p.muted.r(), p.muted.g(), p.muted.b(), 18) }
+                    else  { Color32::TRANSPARENT },
+                    Stroke::new(1.0, if th { p.dim } else { p.border }),
+                );
+                ui.painter().text(retry_rect.center(), egui::Align2::CENTER_CENTER,
+                    "↺  RETRY", FontId::monospace(11.0),
+                    if th { p.text } else { p.muted });
+
+                // Confirm
+                let confirm_rect = Rect::from_min_size(
+                    Pos2::new(row_rect.min.x + (btn_w + gap) * 2.0, row_rect.min.y),
+                    Vec2::new(btn_w, row_h),
+                );
+                let cr = ui.interact(confirm_rect, ui.id().with("min_confirm"), Sense::click());
+                let ch = cr.hovered();
+                ui.painter().rect(
+                    confirm_rect, Rounding::same(8.0),
+                    if ch { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 22) }
+                    else  { Color32::TRANSPARENT },
+                    Stroke::new(1.0, if ch { p.play } else { p.border }),
+                );
+                ui.painter().text(confirm_rect.center(), egui::Align2::CENTER_CENTER,
+                    "✔  CONFIRM", FontId::monospace(11.0),
+                    if ch { p.play } else { p.muted });
+
+                if rr.clicked() { self.handle_command(Command::Reject); }
+                if tr.clicked() { self.handle_command(Command::RetryCurrentTake); }
+                if cr.clicked() { self.handle_command(Command::Approve); }
             }
         });
     }

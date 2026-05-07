@@ -103,12 +103,14 @@ pub struct RecorderApp {
     // live_peaks is a VecDeque of peak values, one per BUCKET_SAMPLES samples
     // At most MAX_LIVE_BUCKETS entries.  Oldest bucket falls/scrolls off
     // the left as recording progresses
+    pub live_peaks:         VecDeque<f32>,
     // live_sample_cursor: how many samples from current.samples have already
     // been committed into buckets.  Each update, clone ONLY the slice
     // [live_sample_cursor..], which is always small (~50 ms of audio)
     // which keeps the clone O(new data) instead of O(total recording length)
-    pub live_peaks:         VecDeque<f32>,
     pub live_sample_cursor: usize,
+    // switch between minimal and advanced mode
+    pub minimal_mode: bool,
 }
 
 impl RecorderApp {
@@ -140,6 +142,7 @@ impl RecorderApp {
             waveform_cache:    HashMap::new(),
             live_peaks:        VecDeque::new(),
             live_sample_cursor: 0,
+            minimal_mode: false,
         }
     }
 
@@ -400,7 +403,6 @@ impl RecorderApp {
                     None
                 };
 
-                // Stale segment caches — same approach as before.
                 let seg_updates: Vec<(usize, usize, Vec<f32>)> = rec.project.segments
                     .iter()
                     .enumerate()
@@ -416,15 +418,14 @@ impl RecorderApp {
                 let seg_count = rec.project.segments.len();
                 Some((is_active, new_tail, seg_updates, seg_count))
             }
-            // Audio thread has the lock — skip this frame, zero audio impact.
             Err(_) => None,
         };
-        // Lock is dropped here ── all work below operates on owned data ──────
+        // Lock is dropped here all work below operates on owned data
 
         let Some((is_active, new_tail, seg_updates, seg_count)) = snapshot
         else { return; };
 
-        // ── Live waveform ─────────────────────────────────────────────────
+        // -- Live waveform -------------------------------------------------
         if !is_active {
             // State left recording/reviewing — reset for next take.
             if !self.live_peaks.is_empty() {
@@ -451,7 +452,7 @@ impl RecorderApp {
             }
         }
 
-        // ── Segment caches ────────────────────────────────────────────────
+        // Segment caches
         for (idx, sample_count, samples) in seg_updates {
             let peaks = compute_waveform_peaks(&samples, SEG_BUCKETS);
             self.waveform_cache.insert(idx, (sample_count, peaks));
@@ -490,7 +491,7 @@ fn run_cli() {
         if clear {
             print!("\x1B[2J\x1B[H");
             println!("{}", "=".repeat(60).cyan());
-            println!("  {} — {}", "PARTS OF SPEECH".bold().bright_white(), "CLI Mode".italic());
+            println!("  {} : {}", "PARTS OF SPEECH".bold().bright_white(), "CLI Mode".italic());
             println!("{}", "  (run with --gui for the graphical interface)".dimmed());
             println!("{}", "=".repeat(60).cyan());
             println!("\n{}", "  COMMANDS".underline());

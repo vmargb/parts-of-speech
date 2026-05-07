@@ -25,7 +25,7 @@ pub fn start_input_stream(
         let mut rec = recorder.lock().unwrap();
         rec.project.sample_rate = hardware_sample_rate;
         rec.project.channels = hardware_channels;
-        println!("Hardware: {}Hz, {} channel(s)", hardware_sample_rate, hardware_channels);
+        // println!("Hardware: {}Hz, {} channel(s)", hardware_sample_rate, hardware_channels);
     }
 
     let stream = device.build_input_stream(
