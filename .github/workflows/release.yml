@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'   # triggers on new tag
+      - 'v*' # triggers on new tag
 
 permissions:
   contents: write
@@ -13,7 +13,7 @@ jobs:
     name: Build — ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false   # don't cancel other platforms if one fails
+      fail-fast: false # don't cancel other platforms if one fails
       matrix:
         include:
           - os: ubuntu-latest
@@ -28,6 +28,11 @@ jobs:
           - os: macos-latest
             artifact: parts-of-speech
             asset:    parts-of-speech-macos-arm64
+
+          # macos-13: last Intel-based macOS
+          - os: macos-13
+            artifact: parts-of-speech
+            asset:    parts-of-speech-macos-x64
 
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +50,7 @@ jobs:
         run: cargo build --release
 
       # Rename to the platform-suffixed asset name before uploading
-      # shell: bash works on all three platforms (Windows runners have Git Bash).
+      # shell: bash works on all three platforms (Windows runners have Git Bash)
       - name: Rename binary
         shell: bash
         run: mv target/release/${{ matrix.artifact }} target/release/${{ matrix.asset }}
