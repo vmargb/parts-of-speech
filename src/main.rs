@@ -4,6 +4,7 @@ mod audio_output;
 mod export;
 mod gui;
 mod themes;
+mod config;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -12,6 +13,7 @@ use cpal::traits::StreamTrait;
 use state::{AppState, RecorderState, Command, dispatch_command, PlaybackState, Segment};
 use audio_output::{play_segment_async, play_project_async, ProjectSnapshot, NO_SEGMENT};
 use colored::*;
+use serde::{Deserialize, Serialize};
 
 // ** input **
 // Microphone -> audio_input.rs ->(samples only)
@@ -39,6 +41,10 @@ use colored::*;
 
 // -- App settings (non-audio settings, GUI-owned) ---------------------------------
 
+// persisted to disk via config.rs. `serde(default)`, fields missing from an older
+// settings file fall back to AppSettings::default() instead of failing to load.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub trim_preview_secs: f32, // how many seconds to play when previewing a trim edge (start or end)
     pub auto_play_on_stop: bool, // whether to auto-play the current segment immediately after stopping
@@ -120,6 +126,8 @@ pub struct RecorderApp {
     pub live_sample_cursor: usize,
     // switch between minimal and advanced mode
     pub minimal_mode: bool,
+    // what is currently on disk, so we only write when something actually changed
+    pub saved_config:      config::SavedConfig,
 }
 
 impl RecorderApp {
@@ -128,7 +136,9 @@ impl RecorderApp {
         let recorder = Arc::new(Mutex::new(RecorderState::new(48000, 1)));
         let stream = audio_input::start_input_stream(recorder.clone(), on_new_data);
         stream.play().unwrap();
-        let theme = themes::ThemeKind::Dark;
+        // restore the theme and settings from the last session (defaults if none)
+        let saved_config = config::SavedConfig::load();
+        let theme = saved_config.theme.clone();
         let palette = themes::palette_for(&theme);
         Self {
             recorder,
@@ -149,11 +159,25 @@ impl RecorderApp {
             show_settings:     false,
             theme,
             palette,
-            settings:          AppSettings::default(),
+            settings:          saved_config.settings.clone(),
             waveform_cache:    HashMap::new(),
             live_peaks:        VecDeque::new(),
             live_sample_cursor: 0,
             minimal_mode: false,
+            saved_config,
+        }
+    }
+
+    // write theme + settings to disk if they differ from what is already saved
+    // called every frame (one small struct comparison)
+    pub fn save_config_if_changed(&mut self) {
+        let current = config::SavedConfig {
+            theme: self.theme.clone(),
+            settings: self.settings.clone(),
+        };
+        if current != self.saved_config {
+            current.save();
+            self.saved_config = current;
         }
     }
 
@@ -641,6 +665,7 @@ fn run_cli() {
                     },
                     None => app.settings.pre_roll_enabled = !app.settings.pre_roll_enabled,
                 }
+                app.save_config_if_changed();
                 println!("  Pre-roll: {}", if app.settings.pre_roll_enabled {
                     format!("on ({:.1}s)", app.settings.pre_roll_secs)
                 } else { "off".to_string() });

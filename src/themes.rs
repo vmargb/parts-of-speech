@@ -2,9 +2,10 @@ use eframe::egui::Color32;
 
 // -- Theme types ---------------------------------------------------------------
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum ThemeKind {
     // Dark themes
+    #[default]
     Dark,
     Peach,
     ColdBlue,

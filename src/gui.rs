@@ -27,15 +27,15 @@ fn settings_checkbox(ui: &mut egui::Ui, p: &crate::themes::Palette, on: bool) ->
     ui.painter().rect(r, Rounding::same(3.0),
         if on { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 60) }
         else { p.surf3 },
-        Stroke::new(1.0, if on { p.play } else { p.bordbr }));
+        Stroke::new(1.0_f32, if on { p.play } else { p.bordbr }));
     if on {
         let c = r.center();
         ui.painter().line_segment(
             [Pos2::new(c.x - 3.5, c.y), Pos2::new(c.x - 1.0, c.y + 3.0)],
-            Stroke::new(1.5, p.play));
+            Stroke::new(1.5_f32, p.play));
         ui.painter().line_segment(
             [Pos2::new(c.x - 1.0, c.y + 3.0), Pos2::new(c.x + 4.0, c.y - 2.5)],
-            Stroke::new(1.5, p.play));
+            Stroke::new(1.5_f32, p.play));
     }
     resp.clicked()
 }
@@ -83,6 +83,11 @@ impl eframe::App for RecorderApp {
         // keep palette in sync with current theme (struct copy each frame)
         self.palette = palette_for(&self.theme);
         self.apply_theme(ctx);
+
+        // persist theme/settings changes
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.save_config_if_changed();
+        }
         // Refresh waveform peak caches before any drawing.
         // Uses try_lock internally safe to call here with no locks held.
         self.update_waveform_caches();
