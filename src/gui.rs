@@ -8,6 +8,39 @@ use crate::RecorderApp;
 use crate::themes::{ThemeKind, palette_for};
 
 
+// Coarse UI state used by the transport, minimal mode and keyboard handling.
+// "cueing" = a take has been started but its pre-roll cue is still playing, so
+// nothing is being captured yet (AppState is already Recording at that point).
+fn state_label(rec: &crate::state::RecorderState) -> &'static str {
+    match &rec.state {
+        AppState::Idle                          => "idle",
+        AppState::Recording if rec.pre_rolling => "cueing",
+        AppState::Recording                     => "recording",
+        AppState::Reviewing                     => "reviewing",
+    }
+}
+
+// Settings checkbox in the same style as the existing "auto-play" toggle.
+// Returns true when it was clicked this frame.
+fn settings_checkbox(ui: &mut egui::Ui, p: &crate::themes::Palette, on: bool) -> bool {
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::click());
+    ui.painter().rect(r, Rounding::same(3.0),
+        if on { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 60) }
+        else { p.surf3 },
+        Stroke::new(1.0, if on { p.play } else { p.bordbr }));
+    if on {
+        let c = r.center();
+        ui.painter().line_segment(
+            [Pos2::new(c.x - 3.5, c.y), Pos2::new(c.x - 1.0, c.y + 3.0)],
+            Stroke::new(1.5, p.play));
+        ui.painter().line_segment(
+            [Pos2::new(c.x - 1.0, c.y + 3.0), Pos2::new(c.x + 4.0, c.y - 2.5)],
+            Stroke::new(1.5, p.play));
+    }
+    resp.clicked()
+}
+
+
 // -- eframe::App ---------------------------------------------------------------
 impl eframe::App for RecorderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -265,12 +298,13 @@ impl RecorderApp {
         let p = &self.palette;
         let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
         let (text, col) = match (&rec.state, &rec.playback_state) {
+            (AppState::Recording, _) if rec.pre_rolling => ("CUE", p.amber),
             (AppState::Recording, _)    => ("REC",    p.rec),
             (_, PlaybackState::Playing) => ("PLAY",   p.play),
             (AppState::Reviewing, _)    => ("REVIEW", p.amber),
             _                           => ("IDLE",   p.muted),
         };
-        let alpha = if matches!(rec.state, AppState::Recording) {
+        let alpha = if matches!(rec.state, AppState::Recording) && !rec.pre_rolling {
             ((t * 2.8).sin() * 0.42 + 0.58).clamp(0.0, 1.0)
         } else { 1.0 };
         let col = Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), (alpha * 255.0) as u8);
@@ -281,11 +315,7 @@ impl RecorderApp {
     fn draw_transport_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (state_str, is_playing, seg_count, cur_samples, sample_rate, can_undo, can_redo) = {
             let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
-            let s = match &rec.state {
-                AppState::Idle      => "idle",
-                AppState::Recording => "recording",
-                AppState::Reviewing => "reviewing",
-            };
+            let s = state_label(&rec);
             (s,
              rec.playback_state == PlaybackState::Playing,
              rec.get_segment_count(),
@@ -316,7 +346,7 @@ impl RecorderApp {
             // -- Timer ---------------------------------------------------------
             let secs = cur_samples as f32 / sample_rate.max(1) as f32;
             let timer_col = match state_str {
-                "recording" => p.rec, "reviewing" => p.amber,
+                "recording" => p.rec, "reviewing" | "cueing" => p.amber,
                 _ => Color32::from_rgb(
                     (p.bg.r() as u16 + p.surf3.r() as u16 / 2) as u8,
                     (p.bg.g() as u16 + p.surf3.g() as u16 / 2) as u8,
@@ -331,6 +361,7 @@ impl RecorderApp {
                 ui.add_space(2.0);
                 let sub = match state_str {
                     "recording" => format!("recording  --  {} samples captured", cur_samples),
+                    "cueing"    => "pre-roll  --  recording starts when it ends  --  SPACE to skip  --  S to cancel".into(),
                     "reviewing" => "listen -- confirm or reject -- try again".into(),
                     _ if seg_count > 0 =>
                         format!("{} segment{}  --  ready", seg_count, if seg_count == 1 { "" } else { "s" }),
@@ -406,7 +437,9 @@ impl RecorderApp {
                     self.transport_btn(ui, ctx, "STOP",    w, h, false, p.muted, || {});
                     ui.add_space(gap);
                     // centre slot: the actual stop-playback button
-                    self.transport_btn(ui, ctx, "■ STOP PLAYBACK", w, h, true, p.amber,
+                    // during the pre-roll cue this button skips ahead to recording
+                    let stop_lbl = if state_str == "cueing" { "■ SKIP PRE-ROLL" } else { "■ STOP PLAYBACK" };
+                    self.transport_btn(ui, ctx, stop_lbl, w, h, true, p.amber,
                         || self.handle_command(Command::StopPlayback));
                     ui.add_space(gap);
                     self.transport_btn(ui, ctx, "CONFIRM", w, h, false, p.play,  || {});
@@ -1462,30 +1495,34 @@ impl RecorderApp {
 
                     // auto-play on stop toggle
                     ui.horizontal(|ui| {
-                        let apos_on  = self.settings.auto_play_on_stop;
-                        let (chk_r, chk_resp) = ui.allocate_exact_size(
-                            Vec2::new(14.0, 14.0), Sense::click());
-                        ui.painter().rect(chk_r, Rounding::same(3.0),
-                            if apos_on { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 60) }
-                            else { p.surf3 },
-                            Stroke::new(1.0_f32, if apos_on { p.play } else { p.bordbr }));
-                        if apos_on {
-                            // draw a simple checkmark
-                            let c = chk_r.center();
-                            ui.painter().line_segment(
-                                [Pos2::new(c.x - 3.5, c.y), Pos2::new(c.x - 1.0, c.y + 3.0)],
-                                Stroke::new(1.5_f32, p.play));
-                            ui.painter().line_segment(
-                                [Pos2::new(c.x - 1.0, c.y + 3.0), Pos2::new(c.x + 4.0, c.y - 2.5)],
-                                Stroke::new(1.5_f32, p.play));
-                        }
-                        if chk_resp.clicked() {
-                            self.settings.auto_play_on_stop = !apos_on;
+                        let on = self.settings.auto_play_on_stop;
+                        if settings_checkbox(ui, p, on) {
+                            self.settings.auto_play_on_stop = !on;
                         }
                         ui.add_space(8.0);
                         ui.label(RichText::new("Auto-play segment after stopping")
                             .font(FontId::monospace(9.5)).color(p.text));
                     });
+
+                    ui.add_space(8.0);
+
+                    // pre-roll (cueing) toggle + length
+                    ui.horizontal(|ui| {
+                        let on = self.settings.pre_roll_enabled;
+                        if settings_checkbox(ui, p, on) {
+                            self.settings.pre_roll_enabled = !on;
+                        }
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Pre-roll before recording")
+                            .font(FontId::monospace(9.5)).color(p.text));
+                        ui.add_space(10.0);
+                        ui.add_enabled(self.settings.pre_roll_enabled,
+                            egui::DragValue::new(&mut self.settings.pre_roll_secs)
+                                .range(0.5_f32..=15.0).speed(0.1).suffix(" s").fixed_decimals(1));
+                    });
+                    ui.label(RichText::new(
+                        "  plays the end of the preceding audio, then recording starts automatically")
+                        .font(FontId::monospace(8.0)).color(p.dim));
 
                     ui.add_space(8.0);
 
@@ -1590,11 +1627,7 @@ impl RecorderApp {
         // before ctx.input(), breaks the cycle entirely.
         let (state_str, playing, count) = {
             let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
-            let s = match &rec.state {
-                AppState::Idle      => "idle",
-                AppState::Recording => "recording",
-                AppState::Reviewing => "reviewing",
-            };
+            let s = state_label(&rec);
             (s, rec.playback_state == PlaybackState::Playing, rec.get_segment_count())
         }; // recorder mutex fully released here
 
@@ -1630,7 +1663,7 @@ impl RecorderApp {
             if i.key_pressed(egui::Key::Space) && playing {
                 self.handle_command(Command::StopPlayback);
             }
-            if i.key_pressed(egui::Key::S) && state_str == "recording" {
+            if i.key_pressed(egui::Key::S) && (state_str == "recording" || state_str == "cueing") {
                 self.handle_command(Command::StopRecording);
             }
             if i.key_pressed(egui::Key::C) && state_str == "reviewing" && !playing {
@@ -1668,11 +1701,7 @@ impl RecorderApp {
         // snapshot state (lock & drop)
         let (state_str, is_playing, cur_samples, sample_rate) = {
             let rec = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
-            let s = match &rec.state {
-                AppState::Idle      => "idle",
-                AppState::Recording => "recording",
-                AppState::Reviewing => "reviewing",
-            };
+            let s = state_label(&rec);
             let ip = rec.playback_state == PlaybackState::Playing;
             let cs = rec.current.as_ref().map(|c| c.samples.len()).unwrap_or(0);
             (s, ip, cs, rec.project.sample_rate)
@@ -1696,6 +1725,7 @@ impl RecorderApp {
             // Timer
             let timer_color = match state_str {
                 "recording"               => p.rec,
+                "cueing"                  => p.amber,
                 "reviewing" if is_playing => p.amber,
                 "reviewing"               => p.text,
                 _                         => p.dim,
@@ -1711,6 +1741,7 @@ impl RecorderApp {
             // Status hint
             let hint = match state_str {
                 "recording"               => "S to stop",
+                "cueing"                  => "pre-roll ...  SPACE to skip  ·  S to cancel",
                 "reviewing" if is_playing => "playing back ...",
                 "reviewing"               => "C confirm  ·  X reject  ·  T retry",
                 _                         => "R to record",
@@ -1772,6 +1803,7 @@ impl RecorderApp {
 
             let (btn_label, btn_col, font_size) = match state_str {
                 "recording"               => ("STOP", p.rec,   22.0_f32),
+                "cueing"                  => ("■",    p.amber, 30.0),
                 "reviewing" if is_playing => ("■",    p.amber, 30.0),
                 "reviewing"               => ("▶",    p.play,  30.0),
                 _                         => ("REC",  p.rec,   26.0),
@@ -1802,6 +1834,7 @@ impl RecorderApp {
                 match state_str {
                     "idle"      => self.handle_command(Command::StartRecording),
                     "recording" => self.handle_command(Command::StopRecording),
+                    "cueing"    => self.handle_command(Command::StopPlayback), // skip the cue
                     "reviewing" => {
                         if is_playing { self.handle_command(Command::StopPlayback); }
                         else          { self.play_current_segment(); }

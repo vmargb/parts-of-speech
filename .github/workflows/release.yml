@@ -29,11 +29,6 @@ jobs:
             artifact: parts-of-speech
             asset:    parts-of-speech-macos-arm64
 
-          # macos-13: last Intel-based macOS
-          - os: macos-13
-            artifact: parts-of-speech
-            asset:    parts-of-speech-macos-x64
-
     steps:
       - uses: actions/checkout@v4
 

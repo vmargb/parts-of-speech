@@ -102,6 +102,7 @@ pub struct RecorderState {
     pub previous_current: Option<Segment>, // backup for uncommitted segment
     pub next_current: Option<Segment>, // redo backup for uncommitted segment
     pub save_path: Option<String>, // where the project is saved
+    pub pre_rolling: bool, // true while pre-roll cue is playing
 }
 
 // holds the the current segment being recorded, the state
@@ -127,6 +128,7 @@ impl RecorderState { // master struct
             previous_current: None,
             next_current: None,
             save_path: None,
+            pre_rolling: false,
         }
     }
 
@@ -233,6 +235,26 @@ impl RecorderState { // master struct
         }
 
         false
+    }
+
+    // The last `secs` seconds of audio that will sit directly *before* the take
+    // that is about to be recorded, for pre-roll cueing
+    pub fn pre_roll_samples(&self, secs: f32) -> Vec<f32> {
+        let want = (secs.max(0.0) * self.project.sample_rate as f32) as usize;
+        let end = self.project.editing_index
+            .unwrap_or(self.project.segments.len())
+            .min(self.project.segments.len());
+        if want == 0 || end == 0 { return Vec::new(); }
+
+        let mut chunks: Vec<&[f32]> = Vec::new(); // collected newest-first
+        let mut got = 0usize;
+        for seg in self.project.segments[..end].iter().rev() {
+            if got >= want { break; }
+            let take = (want - got).min(seg.samples.len());
+            chunks.push(&seg.samples[seg.samples.len() - take..]);
+            got += take;
+        }
+        chunks.iter().rev().flat_map(|c| c.iter().copied()).collect()
     }
 
     // *** Workflow Methods ***

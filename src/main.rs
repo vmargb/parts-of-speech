@@ -42,6 +42,8 @@ use colored::*;
 pub struct AppSettings {
     pub trim_preview_secs: f32, // how many seconds to play when previewing a trim edge (start or end)
     pub auto_play_on_stop: bool, // whether to auto-play the current segment immediately after stopping
+    pub pre_roll_enabled: bool, // play the audio preceding a take before recording starts (cueing)
+    pub pre_roll_secs: f32, // how many seconds of preceding audio to cue
     pub default_export_dir: Option<String>, // if set, the WAV export file-dialog opens here instead of the project dir
 }
 
@@ -50,6 +52,8 @@ impl Default for AppSettings {
         Self {
             trim_preview_secs: 3.0, // previous 3 seconds of s/e
             auto_play_on_stop: true,
+            pre_roll_enabled: true,
+            pre_roll_secs: 3.0,
             default_export_dir: None,
         }
     }
@@ -214,8 +218,57 @@ impl RecorderApp {
         }
     }
 
+    // Run a command that starts a recording (record / retake / insert / try again)
+    // and, if pre-roll is on, cue the audio that precedes the take first.
+    //
+    // mic captures nothing while the cue plays
+    fn dispatch_with_pre_roll(&self, cmd: Command) {
+        let (cue, sample_rate) = {
+            let mut rec = self.recorder.lock().unwrap();
+            let was_recording = matches!(rec.state, state::AppState::Recording);
+            dispatch_command(&mut rec, cmd);
+
+            // only cue when this command actually moved us INTO Recording
+            if !self.settings.pre_roll_enabled
+                || was_recording
+                || !matches!(rec.state, state::AppState::Recording)
+                || rec.playback_state == PlaybackState::Playing
+            { return; }
+
+            let samples = rec.pre_roll_samples(self.settings.pre_roll_secs);
+            if samples.is_empty() { return; } // nothing precedes this take, record right away
+            rec.pre_rolling = true;
+            rec.playback_state = PlaybackState::Playing; // lock is released before spawning
+            (samples, rec.project.sample_rate)
+        };
+
+        self.stop_playback.store(false, Ordering::Relaxed);
+        let recorder = self.recorder.clone();
+        play_segment_async(
+            Segment { samples: cue, is_silence: false },
+            sample_rate,
+            self.recorder.clone(),
+            self.stop_playback.clone(),
+            // runs on the audio thread when the cue ends OR is skipped via stop flag
+            move || {
+                if let Ok(mut rec) = recorder.lock() { rec.pre_rolling = false; }
+            },
+        );
+    }
+
+    // abandon a take that is still in its pre-roll cue, nothing has been recorded
+    fn cancel_pre_roll(&self) -> bool {
+        {
+            let mut rec = self.recorder.lock().unwrap();
+            if !rec.pre_rolling { return false; }
+            rec.pre_rolling = false;
+            rec.reject();
+        }
+        self.stop_playback.store(true, Ordering::Relaxed);
+        true
+    }
+
     // play the whole project starting at segment `start_idx`
-    // the audio thread updates `playing_segment` as it advances
     pub fn play_project_from(&self, start_idx: usize) {
         let rec = self.recorder.lock().unwrap();
         if rec.playback_state == PlaybackState::Playing { return; }
@@ -235,6 +288,8 @@ impl RecorderApp {
     pub fn handle_command(&self, cmd: Command) {
         match cmd {
             Command::StopRecording => {
+                // STOP during the pre-roll cue = cancel this take
+                if self.cancel_pre_roll() { return; }
                 {
                     let mut rec = self.recorder.lock().unwrap();
                     rec.stop_recording(); // change to reviewing
@@ -258,6 +313,7 @@ impl RecorderApp {
             }
 
             Command::Reject => { // gated by playback state
+                if self.cancel_pre_roll() { return; } // reject during the cue = cancel the take
                 let rec = self.recorder.lock().unwrap();
                 if rec.playback_state == PlaybackState::Playing {
                     println!("Wait for playback to finish before rejecting.");
@@ -275,8 +331,7 @@ impl RecorderApp {
                     return;
                 }
                 drop(rec);
-                let mut rec = self.recorder.lock().unwrap();
-                dispatch_command(&mut rec, Command::RetryCurrentTake);
+                self.dispatch_with_pre_roll(Command::RetryCurrentTake);
             }
 
             // *** Non-dispatch commands
@@ -330,6 +385,11 @@ impl RecorderApp {
             }
 
             // All other commands change state.rs which are delegated to dispatch_command
+            // commands that start a take go through the pre-roll cue
+            other @ (Command::StartRecording
+                   | Command::RetrySegment(_)
+                   | Command::InsertAfter(_)) => self.dispatch_with_pre_roll(other),
+
             other => {
                 let mut rec = self.recorder.lock().unwrap();
                 dispatch_command(&mut rec, other);
@@ -497,7 +557,7 @@ fn run_gui() {
 }
 
 fn run_cli() {
-    let app = RecorderApp::new(|| {});
+    let mut app = RecorderApp::new(|| {});
     let mut clear = true;
 
     loop {
@@ -525,6 +585,7 @@ fn run_cli() {
             }
             println!("\n  {}  {} <secs> | {} #n", "TRIM:".dimmed(), "trim start|end".yellow(), "delete".red());
             println!("  {}  {} #n [secs]  |  {} #n [secs]", "SILENCE:".dimmed(), "silence".yellow(), "expand".yellow());
+            println!("  {}  {} [secs|off]  (cue the audio before a take)", "PRE-ROLL:".dimmed(), "preroll".yellow());
             println!("  {}  {}", "EXIT:".dimmed(), "e (export) | quit".red());
             println!("{}", "-".repeat(60).cyan());
         }
@@ -537,6 +598,8 @@ fn run_cli() {
             let playing = rec.playback_state == PlaybackState::Playing;
             
             match rec.state {
+                state::AppState::Recording if rec.pre_rolling =>
+                    format!(" {} {} ", "♪".yellow(), "PRE-ROLL (stop = skip, s = cancel)".yellow().bold()),
                 state::AppState::Recording => 
                     format!(" {} {} ", "●".red().blink(), "RECORDING".red().bold()),
                 state::AppState::Reviewing => 
@@ -561,7 +624,27 @@ fn run_cli() {
             "r"  => app.handle_command(Command::StartRecording),
             "s"  => app.handle_command(Command::StopRecording),
             // "stop" in CLI stops playback (not "s" which stops recording)
+            // During a pre-roll cue it skips the cue and starts recording.
             "stop" => app.handle_command(Command::StopPlayback),
+            // preroll          -> toggle on/off
+            // preroll <secs>   -> turn on and set the cue length
+            // preroll off      -> turn off
+            "preroll" => {
+                match parts.get(1) {
+                    Some(&"off") => app.settings.pre_roll_enabled = false,
+                    Some(arg) => match arg.parse::<f32>() {
+                        Ok(secs) if secs > 0.0 => {
+                            app.settings.pre_roll_secs = secs.clamp(0.5, 15.0);
+                            app.settings.pre_roll_enabled = true;
+                        }
+                        _ => println!("  Usage: preroll [seconds|off]"),
+                    },
+                    None => app.settings.pre_roll_enabled = !app.settings.pre_roll_enabled,
+                }
+                println!("  Pre-roll: {}", if app.settings.pre_roll_enabled {
+                    format!("on ({:.1}s)", app.settings.pre_roll_secs)
+                } else { "off".to_string() });
+            }
             "c"  => app.handle_command(Command::Approve),
             "x"  => app.handle_command(Command::Reject),
             "t"  => app.handle_command(Command::RetryCurrentTake),

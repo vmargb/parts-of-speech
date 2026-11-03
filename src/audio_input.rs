@@ -41,7 +41,9 @@ pub fn start_input_stream(
             // mutex we get a lock-order inversion and the app freezes
             // releasing the mutex first breaks the cycle.
             let should_repaint = if let Ok(mut rec) = recorder.try_lock() {
-                if let AppState::Recording = rec.state {
+                // While the pre-roll cue plays the state is already Recording, but
+                // nothing may be captured until the cue ends (rec.pre_rolling).
+                if matches!(rec.state, AppState::Recording) && !rec.pre_rolling {
                     if let Some(seg) = rec.current.as_mut() {
                         if hardware_channels == 1 { // mono, just copy
                             seg.samples.extend_from_slice(data);
