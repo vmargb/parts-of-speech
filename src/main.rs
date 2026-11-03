@@ -7,10 +7,10 @@ mod themes;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use cpal::traits::StreamTrait;
 use state::{AppState, RecorderState, Command, dispatch_command, PlaybackState, Segment};
-use audio_output::{play_segment_async, play_project_async, ProjectSnapshot};
+use audio_output::{play_segment_async, play_project_async, ProjectSnapshot, NO_SEGMENT};
 use colored::*;
 
 // ** input **
@@ -92,6 +92,11 @@ pub struct RecorderApp {
     // instead stop playback and store the intent here update() drains it
     // the next frame once the audio thread has actually gone Idle.
     pub pending_seek:            Option<(usize, f32)>,
+    // Project index of the segment currently audible during PLAY ALL, PLAY FROM
+    pub playing_segment:         Arc<AtomicUsize>,
+    // The segment the list was last auto-scrolled to, so we only scroll when the
+    // playing segment changes instead of fighting the user's scroll wheel
+    pub last_scrolled_segment:   Option<usize>,
     pub show_keybindings:  bool,
     pub show_settings:     bool,
     pub theme:             themes::ThemeKind,
@@ -134,6 +139,8 @@ impl RecorderApp {
             playback_display_offset: 0.0,
             prev_is_playing:         false,
             pending_seek:            None,
+            playing_segment:         Arc::new(AtomicUsize::new(NO_SEGMENT)),
+            last_scrolled_segment:   None,
             show_keybindings:  false,
             show_settings:     false,
             theme,
@@ -207,7 +214,23 @@ impl RecorderApp {
         }
     }
 
-    // PlaySegment / PlayAll / Export are handled here because they need either
+    // play the whole project starting at segment `start_idx`
+    // the audio thread updates `playing_segment` as it advances
+    pub fn play_project_from(&self, start_idx: usize) {
+        let rec = self.recorder.lock().unwrap();
+        if rec.playback_state == PlaybackState::Playing { return; }
+        if start_idx >= rec.project.segments.len() { return; } // also covers empty project
+
+        let snapshot = ProjectSnapshot::from_project(&rec.project, start_idx);
+        drop(rec);
+        self.stop_playback.store(false, Ordering::Relaxed);
+        // highlight the first row immediately instead of waiting for the audio thread
+        self.playing_segment.store(start_idx, Ordering::Relaxed);
+        play_project_async(snapshot, self.recorder.clone(),
+            self.stop_playback.clone(), self.playing_segment.clone(), || {});
+    }
+
+    // PlaySegment / PlayAll / PlayFrom / Export are handled here because they need either
     // thread-spawning (playback) or file I/O (export) — not pure state mutation.
     pub fn handle_command(&self, cmd: Command) {
         match cmd {
@@ -272,17 +295,8 @@ impl RecorderApp {
                 }
             }
 
-            Command::PlayAll => {
-                let rec = self.recorder.lock().unwrap();
-                if rec.playback_state == PlaybackState::Playing { return; }
-                if rec.project.segments.is_empty() { return; }
-
-                let snapshot = ProjectSnapshot::from_project(&rec.project);
-                drop(rec);
-                self.stop_playback.store(false, Ordering::Relaxed);
-                play_project_async(snapshot, self.recorder.clone(),
-                    self.stop_playback.clone(), || {});
-            }
+            Command::PlayAll => self.play_project_from(0),
+            Command::PlayFrom(idx) => self.play_project_from(idx),
 
             // Set the stop flag — the polling loop in the audio thread sees it
             // within ~50ms and drops the player, silencing output immediately.
@@ -553,7 +567,12 @@ fn run_cli() {
             "t"  => app.handle_command(Command::RetryCurrentTake),
             "u"  => app.handle_command(Command::Undo),
             "z"  => app.handle_command(Command::Redo),
-            "pa" => app.handle_command(Command::PlayAll),
+            // pa       -> play everything
+            // pa <n>   -> play from segment n (1-based) to the end
+            "pa" => match parts.get(1).and_then(|s| s.parse::<usize>().ok()) {
+                Some(n) if n >= 1 => app.handle_command(Command::PlayFrom(n - 1)),
+                _                 => app.handle_command(Command::PlayAll),
+            },
 
             // "p" is context-sensitive, during Reviewing it calls play_current_segment()
             // directly (listen again), during Idle it plays a specific or last committed segment

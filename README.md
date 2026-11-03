@@ -78,6 +78,7 @@ consider implementing it in a future update.
 | `p`              | Play         | Play the last recorded segment.                   |
 | `p <n>`          | Play segment | Play segment number n.                            |
 | `pa`             | Play all     | Play all segments in sequence (the full project). |
+| `pa <n>`         | Play from    | Play from segment number n through to the end.    |
 | `retry <n>`      | Retry        | Re-record segment number n.                       |
 | `delete <n>`     | Delete       | Delete segment number n.                          |
 | `insert <n>`     | Insert       | Insert a new segment after position n.            |
@@ -103,7 +104,8 @@ consider implementing it in a future update.
    - Repeat steps 1-3 until you have recorded all the necessary segments.
 
 5. **Playback:**
-   - Use `pa` to listen to the entire project or `p <n>` to play a specific segment.
+   - Use `pa` to listen to the entire project, `pa <n>` to listen from segment n onward, or `p <n>` to play a single segment.
+   - In the GUI, the segment that is currently playing is highlighted. Click a segment to select it and the PLAY ALL button becomes PLAY FROM #n (click the segment again to deselect).
 
 6. **Edit Segments:**
    - Use `retry <n>`, `delete <n>`, and `insert <n>` to make any necessary adjustments to your segments.

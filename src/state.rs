@@ -67,6 +67,9 @@ pub enum Command {
     RetryCurrentTake,
     PlaySegment(usize),
     PlayAll,
+    // play the project starting at the given segment index (0-based)
+    // PlayAll is equivalent to PlayFrom(0)
+    PlayFrom(usize),
     RetrySegment(usize),
     InsertAfter(usize),
     DeleteSegment(usize),
@@ -602,7 +605,7 @@ mod tests {
 }
 
 // state dispatch, called by main, no audio I/O, no threads
-// Note: audio_output commands(PlaySegment, PlayAll) are handled in main
+// Note: audio_output commands(PlaySegment, PlayAll, PlayFrom) are handled in main
 // because they need hold Arc<Mutex<RecorderState>> + threads and file I/O
 pub fn dispatch_command(rec: &mut RecorderState, cmd: Command) {
     match cmd {

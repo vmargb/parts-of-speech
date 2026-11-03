@@ -1,7 +1,9 @@
 use eframe::egui::{
     self, Color32, FontId, Pos2, Rect, RichText, Rounding, Sense, Stroke, Vec2,
 };
+use std::sync::atomic::Ordering;
 use crate::state::{AppState, PlaybackState, Command};
+use crate::audio_output::NO_SEGMENT;
 use crate::RecorderApp;
 use crate::themes::{ThemeKind, palette_for};
 
@@ -164,21 +166,21 @@ impl RecorderApp {
 
         if is_light {
             v.widgets.noninteractive.bg_fill = p.surf3; 
-            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text);
         } else {
             v.widgets.noninteractive.bg_fill = p.surf2;
-            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.dim);
+            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.dim);
         }
 
         // consistent for both themes
         v.widgets.inactive.bg_fill = p.surf2;
-        v.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.text);
 
         v.widgets.hovered.bg_fill = p.surf3;
-        v.widgets.hovered.fg_stroke = Stroke::new(1.5, p.text);
+        v.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, p.text);
 
         v.widgets.active.bg_fill = p.surf3;
-        v.widgets.active.fg_stroke = Stroke::new(2.0, p.text);
+        v.widgets.active.fg_stroke = Stroke::new(2.0_f32, p.text);
 
         v.selection.bg_fill = Color32::from_rgba_unmultiplied(
             p.play.r(), p.play.g(), p.play.b(), 40);
@@ -250,7 +252,7 @@ impl RecorderApp {
         ui.add_space(10.0);
         let r = ui.available_rect_before_wrap();
         ui.painter().line_segment([r.min, Pos2::new(r.max.x, r.min.y)],
-            Stroke::new(1.0, border));
+            Stroke::new(1.0_f32, border));
         ui.add_space(1.0);
     }
 
@@ -293,11 +295,20 @@ impl RecorderApp {
              rec.history_index < rec.history.len().saturating_sub(1) || rec.next_current.is_some())
         };
 
+        // if a segment is selected (expanded) in the list, PLAY ALL button
+        // becomes "PLAY FROM #n" and starts the project at that segment
+        // clicking the selected row again deselects and get PLAY ALL back
+        let play_from: Option<usize> = self.selected_segment.filter(|&i| i < seg_count);
+        let play_all_label = match play_from {
+            Some(i) => format!("PLAY FROM #{:02}", i + 1),
+            None    => "PLAY ALL".to_string(),
+        };
+
         let p = &self.palette;
 
         egui::Frame {
             fill: p.surf, rounding: Rounding::same(10.0),
-            stroke: Stroke::new(1.0, p.border),
+            stroke: Stroke::new(1.0_f32, p.border),
             inner_margin: egui::Margin { left: 20.0, right: 20.0, top: 16.0, bottom: 16.0 },
             ..Default::default()
         }
@@ -440,11 +451,13 @@ impl RecorderApp {
                     state_str == "reviewing" && !is_playing, p.muted,
                     || self.handle_command(Command::RetryCurrentTake));
                 ui.add_space(gap);
-                // PLAY ALL is disabled while already playing (can't stack playback)
-                // but not blocked by any other state
-                self.transport_btn(ui, ctx, "PLAY ALL", w, h,
+                // PLAY ALL, PLAY FROM #n is disabled while already playing
+                self.transport_btn(ui, ctx, &play_all_label, w, h,
                     seg_count > 0 && !is_playing && state_str == "idle", p.muted,
-                    || self.handle_command(Command::PlayAll));
+                    || self.handle_command(match play_from {
+                        Some(i) => Command::PlayFrom(i),
+                        None    => Command::PlayAll,
+                    }));
                 ui.add_space(gap);
                 // Undo/redo remain blocked during playback — they mutate project data
                 self.transport_btn(ui, ctx, "<< UNDO", w, h,
@@ -474,7 +487,7 @@ impl RecorderApp {
             else if hov { Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 28) }
             else { p.surf2 };
         let border = if hov { color } else if enabled { p.bordbr } else { p.border };
-        ui.painter().rect(rect, Rounding::same(6.0), bg, Stroke::new(1.0, border));
+        ui.painter().rect(rect, Rounding::same(6.0), bg, Stroke::new(1.0_f32, border));
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label,
             FontId::monospace(9.0),
             if !enabled { Color32::from_rgba_unmultiplied(p.text.r(), p.text.g(), p.text.b(), 40) }
@@ -517,7 +530,7 @@ impl RecorderApp {
         if seg_count == 0 {
             egui::Frame::none()
                 .fill(p.surf).rounding(Rounding::same(8.0))
-                .stroke(Stroke::new(1.0, p.border))
+                .stroke(Stroke::new(1.0_f32, p.border))
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
@@ -534,6 +547,10 @@ impl RecorderApp {
         let scroll_height    = (available_height - reserved_height).max(100.0);
 
         let mut preview_request: Option<(usize, SeekKind)> = None;
+
+        // forget the last auto-scrolled row once playback ends, so the next
+        // PLAY ALL scrolls to its first row again
+        if !is_playing { self.last_scrolled_segment = None; }
 
         egui::ScrollArea::vertical()
             .max_height(scroll_height)
@@ -604,6 +621,17 @@ impl RecorderApp {
         // -- allocate the whole row (advances layout cursor) -------------------
         let (row_rect, _) = ui.allocate_exact_size(Vec2::new(row_w, total_h), Sense::hover());
 
+        // now-playing (PLAY ALL, PLAY FROM)
+        // the audio thread publishes the index of the current segment
+        let is_now_playing = is_playing
+            && self.playing_segment.load(Ordering::Relaxed) == idx;
+
+        // keep the playing row on screen
+        if is_now_playing && self.last_scrolled_segment != Some(idx) {
+            ui.scroll_to_rect(row_rect, None);
+            self.last_scrolled_segment = Some(idx);
+        }
+
         // -- background & border -----------------------------------------------
         // Silence rows use a desaturated blue tint so they're immediately
         // distinguishable from recorded audio
@@ -617,13 +645,27 @@ impl RecorderApp {
             if is_selected { blend(p.border, p.blue, 0.70) } else { blend(p.border, p.blue, 0.40) }
         } else if is_selected { blend(p.border, p.blue, 0.5) } else { p.border };
 
-        ui.painter().rect(row_rect, Rounding::same(6.0), bg, Stroke::new(1.0, border_col));
+        // highlight for the row that is currently playing
+        let bg = if is_now_playing { blend(bg, p.amber, 0.16) } else { bg };
+        let border_col = if is_now_playing { p.amber } else { border_col };
+
+        ui.painter().rect(row_rect, Rounding::same(6.0), bg,
+            Stroke::new(if is_now_playing { 1.5_f32 } else { 1.0_f32 }, border_col));
+
+        // solid accent bar on the left edge of the playing row
+        if is_now_playing {
+            let bar = Rect::from_min_size(
+                Pos2::new(row_rect.min.x + 1.0, row_rect.min.y + 5.0),
+                Vec2::new(3.0, main_h - 10.0));
+            ui.painter().rect_filled(bar, Rounding::same(1.5), p.amber);
+        }
 
         // -- info text ---------------------------------------------------------
         let cy = row_rect.min.y + main_h / 2.0;
 
-        // Index number — silence rows rendered in blue, audio rows in mono (teal)
-        let idx_col = if is_silence { p.blue } else { p.mono };
+        // index number, silence rows rendered in blue, audio rows in mono
+        let idx_col = if is_now_playing { p.amber }
+            else if is_silence { p.blue } else { p.mono };
         ui.painter().text(Pos2::new(row_rect.min.x + 18.0, cy),
             egui::Align2::CENTER_CENTER,
             format!("{:02}", idx + 1), FontId::monospace(13.0), idx_col);
@@ -688,7 +730,7 @@ impl RecorderApp {
                 let h = resp.hovered();
                 ui.painter().rect(btn_rect, Rounding::same(4.0),
                     if h { Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 35) } else { p.surf2 },
-                    Stroke::new(1.0, if h { *col } else { p.border }));
+                    Stroke::new(1.0_f32, if h { *col } else { p.border }));
                 ui.painter().text(btn_rect.center(), egui::Align2::CENTER_CENTER,
                     lbl, FontId::monospace(7.5), if h { *col } else { p.dim });
                 if resp.clicked() {
@@ -722,7 +764,7 @@ impl RecorderApp {
             let sep_y = row_rect.min.y + main_h + 3.0;
             ui.painter().line_segment(
                 [Pos2::new(row_rect.min.x + 8.0, sep_y), Pos2::new(row_rect.max.x - 8.0, sep_y)],
-                Stroke::new(1.0, border_col));
+                Stroke::new(1.0_f32, border_col));
 
             let panel_x   = row_rect.min.x + 8.0;
             let panel_w   = (row_w - 16.0).max(10.0);
@@ -756,7 +798,7 @@ impl RecorderApp {
                         let eh = exp_resp.hovered() && can_act;
                         ui.painter().rect(exp_r, Rounding::same(3.0),
                             if eh { Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 35) } else { p.surf3 },
-                            Stroke::new(1.0, if eh { p.blue } else { border_col }));
+                            Stroke::new(1.0_f32, if eh { p.blue } else { border_col }));
                         ui.painter().text(exp_r.center(), egui::Align2::CENTER_CENTER,
                             "expand +", FontId::monospace(7.5),
                             if can_act { p.blue } else { p.muted });
@@ -772,7 +814,7 @@ impl RecorderApp {
                         ui.painter().line_segment(
                             [Pos2::new(dx, divider_rect.min.y + 4.0),
                              Pos2::new(dx, divider_rect.min.y + 20.0)],
-                            Stroke::new(1.0, p.border));
+                            Stroke::new(1.0_f32, p.border));
                         ui.add_space(10.0);
 
                         // -- Trim section -------------------------------------
@@ -794,7 +836,7 @@ impl RecorderApp {
                             let th = tresp.hovered() && can_trim;
                             ui.painter().rect(tr, Rounding::same(3.0),
                                 if th { Color32::from_rgba_unmultiplied(p.amber.r(), p.amber.g(), p.amber.b(), 35) } else { p.surf3 },
-                                Stroke::new(1.0, if th { p.amber } else { p.border }));
+                                Stroke::new(1.0_f32, if th { p.amber } else { p.border }));
                             ui.painter().text(tr.center(), egui::Align2::CENTER_CENTER,
                                 lbl, FontId::monospace(7.5), if can_trim { p.amber } else { p.muted });
                             if tresp.clicked() && can_trim {
@@ -857,7 +899,7 @@ impl RecorderApp {
                             let th = tresp.hovered() && can_trim;
                             ui.painter().rect(tr, Rounding::same(3.0),
                                 if th { Color32::from_rgba_unmultiplied(p.amber.r(), p.amber.g(), p.amber.b(), 35) } else { p.surf3 },
-                                Stroke::new(1.0, if th { p.amber } else { p.border }));
+                                Stroke::new(1.0_f32, if th { p.amber } else { p.border }));
                             ui.painter().text(tr.center(), egui::Align2::CENTER_CENTER,
                                 lbl, FontId::monospace(7.5), if can_trim { p.amber } else { p.muted });
                             if tresp.clicked() && can_trim {
@@ -896,8 +938,10 @@ impl RecorderApp {
                         // The seek bar stays interactive even during playback for the
                         // currently-expanded segment so the user can re-seek without
                         // first pressing Stop.
+                        // while a fresh take is being reviewed, playback_state is also Playing
+                        // but that audio is the current take, not this current segment
                         let can_seek = can_preview
-                            || (is_playing && self.selected_segment == Some(idx));
+                            || (is_playing && is_idle && self.selected_segment == Some(idx));
 
                         // -- seek bar -------------------------------------------------
                         // Width: fill everything between the duration label and the
@@ -913,7 +957,7 @@ impl RecorderApp {
                         let sh = seek_resp.hovered() && can_seek;
                         ui.painter().rect(seek_r, Rounding::same(3.0),
                             p.surf3,
-                            Stroke::new(1.0, if sh { p.bordbr } else { p.border }));
+                            Stroke::new(1.0_f32, if sh { p.bordbr } else { p.border }));
 
                         // Waveform (drawn over bg, under fill & needle)
                         // Reads self.waveform_cache which holds pre-computed
@@ -970,14 +1014,20 @@ impl RecorderApp {
                         ui.painter().line_segment(
                             [Pos2::new(needle_x, seek_r.min.y + 2.0),
                              Pos2::new(needle_x, seek_r.max.y - 2.0)],
-                            Stroke::new(1.5, if can_seek { p.play } else { p.muted }));
+                            Stroke::new(1.5_f32, if can_seek { p.play } else { p.muted }));
 
                         // -- playback progress overlay -----------------------------
                         // Drawn on top of the trim cursor. Only visible for the
                         // currently-expanded segment while audio is playing.
                         // Uses wall-clock elapsed time + the start offset recorded
-                        // when playback began — no audio-thread polling needed.
-                        let playback_pos = if is_playing && self.selected_segment == Some(idx)
+                        // when playback began, no audio-thread polling needed.
+                        // Not drawn during PLAY ALL / PLAY FROM, that playback isn't
+                        // tied to this segment's own start time, and the row
+                        // highlight already shows where we are
+                        let project_playback =
+                            self.playing_segment.load(Ordering::Relaxed) != NO_SEGMENT;
+                        let playback_pos = if is_playing && is_idle && !project_playback
+                            && self.selected_segment == Some(idx)
                             && duration > 0.0
                         {
                             let elapsed = (self.frame_time - self.playback_wall_start) as f32;
@@ -1002,7 +1052,7 @@ impl RecorderApp {
                             ui.painter().line_segment(
                                 [Pos2::new(pb_x, seek_r.min.y + 1.0),
                                  Pos2::new(pb_x, seek_r.max.y - 1.0)],
-                                Stroke::new(2.0, p.amber));
+                                Stroke::new(2.0_f32, p.amber));
                         }
 
                         // time label: show live playback position while playing,
@@ -1066,7 +1116,7 @@ impl RecorderApp {
                         let sh = sresp.hovered() && can_sil;
                         ui.painter().rect(sr, Rounding::same(3.0),
                             if sh { Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 28) } else { p.surf2 },
-                            Stroke::new(1.0, if sh { p.blue } else { p.border }));
+                            Stroke::new(1.0_f32, if sh { p.blue } else { p.border }));
                         ui.painter().text(sr.center(), egui::Align2::CENTER_CENTER,
                             "+ silence after", FontId::monospace(7.0),
                             if can_sil { p.blue } else { p.muted });
@@ -1130,7 +1180,7 @@ impl RecorderApp {
                 let hov = resp.hovered() && enabled;
                 ui.painter().rect(
                     rect, Rounding::same(6.0), p.surf2,
-                    Stroke::new(1.0, if hov { p.text } else { p.border })
+                    Stroke::new(1.0_f32, if hov { p.text } else { p.border })
                 );
                 ui.painter().text(
                     rect.center(), egui::Align2::CENTER_CENTER, label,
@@ -1211,7 +1261,7 @@ impl RecorderApp {
                 let card_w = 440.0_f32;
                 let card_h = (screen.height() - 60.0).min(480.0);
                 let card   = Rect::from_center_size(screen.center(), Vec2::new(card_w, card_h));
-                ui.painter().rect(card, Rounding::same(12.0), p.surf2, Stroke::new(1.0, p.bordbr));
+                ui.painter().rect(card, Rounding::same(12.0), p.surf2, Stroke::new(1.0_f32, p.bordbr));
 
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(card.shrink(22.0)), |ui| {
                     ui.horizontal(|ui| {
@@ -1291,7 +1341,7 @@ impl RecorderApp {
                 let card_w = 520.0_f32;
                 let card_h = (screen.height() - 60.0).min(540.0);
                 let card   = Rect::from_center_size(screen.center(), Vec2::new(card_w, card_h));
-                ui.painter().rect(card, Rounding::same(12.0), p.surf2, Stroke::new(1.0, p.bordbr));
+                ui.painter().rect(card, Rounding::same(12.0), p.surf2, Stroke::new(1.0_f32, p.bordbr));
 
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(card.shrink(24.0)), |ui| {
                     // -- title bar
@@ -1335,7 +1385,7 @@ impl RecorderApp {
 
                                     // background card
                                     ui.painter().rect(sw, Rounding::same(7.0), tp.surf,
-                                        Stroke::new(if is_active { 2.0 } else { 1.0 },
+                                        Stroke::new(if is_active { 2.0_f32 } else { 1.0_f32 },
                                             if is_active              { tp.play   }
                                             else if sw_resp.hovered() { tp.bordbr }
                                             else                      { tp.border }));
@@ -1418,16 +1468,16 @@ impl RecorderApp {
                         ui.painter().rect(chk_r, Rounding::same(3.0),
                             if apos_on { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 60) }
                             else { p.surf3 },
-                            Stroke::new(1.0, if apos_on { p.play } else { p.bordbr }));
+                            Stroke::new(1.0_f32, if apos_on { p.play } else { p.bordbr }));
                         if apos_on {
                             // draw a simple checkmark
                             let c = chk_r.center();
                             ui.painter().line_segment(
                                 [Pos2::new(c.x - 3.5, c.y), Pos2::new(c.x - 1.0, c.y + 3.0)],
-                                Stroke::new(1.5, p.play));
+                                Stroke::new(1.5_f32, p.play));
                             ui.painter().line_segment(
                                 [Pos2::new(c.x - 1.0, c.y + 3.0), Pos2::new(c.x + 4.0, c.y - 2.5)],
-                                Stroke::new(1.5, p.play));
+                                Stroke::new(1.5_f32, p.play));
                         }
                         if chk_resp.clicked() {
                             self.settings.auto_play_on_stop = !apos_on;
@@ -1474,7 +1524,7 @@ impl RecorderApp {
 
                         let (dir_r, _) = ui.allocate_exact_size(Vec2::new(200.0, 18.0), Sense::hover());
                         ui.painter().rect(dir_r, Rounding::same(3.0), p.surf3,
-                            Stroke::new(1.0, p.border));
+                            Stroke::new(1.0_f32, p.border));
                         ui.painter().text(
                             Pos2::new(dir_r.min.x + 6.0, dir_r.center().y),
                             egui::Align2::LEFT_CENTER,
@@ -1488,7 +1538,7 @@ impl RecorderApp {
                         ui.painter().rect(btn_r, Rounding::same(3.0),
                             if bh { Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 30) }
                             else { p.surf2 },
-                            Stroke::new(1.0, if bh { p.blue } else { p.border }));
+                            Stroke::new(1.0_f32, if bh { p.blue } else { p.border }));
                         ui.painter().text(btn_r.center(), egui::Align2::CENTER_CENTER,
                             "CHANGE...", FontId::monospace(7.5), if bh { p.blue } else { p.dim });
                         if btn_resp.clicked() {
@@ -1507,7 +1557,7 @@ impl RecorderApp {
                             ui.painter().rect(clr_r, Rounding::same(3.0),
                                 if ch { Color32::from_rgba_unmultiplied(p.rec.r(), p.rec.g(), p.rec.b(), 30) }
                                 else { p.surf2 },
-                                Stroke::new(1.0, if ch { p.rec } else { p.border }));
+                                Stroke::new(1.0_f32, if ch { p.rec } else { p.border }));
                             ui.painter().text(clr_r.center(), egui::Align2::CENTER_CENTER,
                                 "CLR", FontId::monospace(7.5), if ch { p.rec } else { p.dim });
                             if clr_resp.clicked() {
@@ -1736,7 +1786,7 @@ impl RecorderApp {
             ui.painter().circle_stroke(
                 rect.center(),
                 btn_size / 2.0,
-                Stroke::new(2.0, if hov { btn_col } else { p.border }),
+                Stroke::new(2.0_f32, if hov { btn_col } else { p.border }),
             );
             // Nudge the play triangle slightly right so it looks visually centred
             let label_offset = if btn_label == "▶" { Vec2::new(3.0, 0.0) } else { Vec2::ZERO };
@@ -1785,7 +1835,7 @@ impl RecorderApp {
                     reject_rect, Rounding::same(8.0),
                     if rh { Color32::from_rgba_unmultiplied(p.rec.r(), p.rec.g(), p.rec.b(), 22) }
                     else  { Color32::TRANSPARENT },
-                    Stroke::new(1.0, if rh { p.rec } else { p.border }),
+                    Stroke::new(1.0_f32, if rh { p.rec } else { p.border }),
                 );
                 ui.painter().text(reject_rect.center(), egui::Align2::CENTER_CENTER,
                     "✖  REJECT", FontId::monospace(11.0),
@@ -1802,7 +1852,7 @@ impl RecorderApp {
                     retry_rect, Rounding::same(8.0),
                     if th { Color32::from_rgba_unmultiplied(p.muted.r(), p.muted.g(), p.muted.b(), 18) }
                     else  { Color32::TRANSPARENT },
-                    Stroke::new(1.0, if th { p.dim } else { p.border }),
+                    Stroke::new(1.0_f32, if th { p.dim } else { p.border }),
                 );
                 ui.painter().text(retry_rect.center(), egui::Align2::CENTER_CENTER,
                     "↺  RETRY", FontId::monospace(11.0),
@@ -1819,7 +1869,7 @@ impl RecorderApp {
                     confirm_rect, Rounding::same(8.0),
                     if ch { Color32::from_rgba_unmultiplied(p.play.r(), p.play.g(), p.play.b(), 22) }
                     else  { Color32::TRANSPARENT },
-                    Stroke::new(1.0, if ch { p.play } else { p.border }),
+                    Stroke::new(1.0_f32, if ch { p.play } else { p.border }),
                 );
                 ui.painter().text(confirm_rect.center(), egui::Align2::CENTER_CENTER,
                     "✔  CONFIRM", FontId::monospace(11.0),

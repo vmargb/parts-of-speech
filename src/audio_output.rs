@@ -1,7 +1,7 @@
 use rodio::{DeviceSinkBuilder, Player, buffer::SamplesBuffer};
 use std::num::{NonZeroU16, NonZeroU32}; // positive channel and sample_rate
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use crate::state::{Segment, Project, PlaybackState};
 
@@ -54,10 +54,16 @@ pub fn play_segment_async(
     });
 }
 
+// sentinel stored in `current_segment` when no project playback is running
+pub const NO_SEGMENT: usize = usize::MAX;
+
+// plays the snapshot, which may start part-way through the project
+// ProjectSnapshot::from_project) as a queue of one source per segment
 pub fn play_project_async(
-    project_snapshot: ProjectSnapshot, // copy of whole project
+    project_snapshot: ProjectSnapshot, // copy of the project from `first_index` onward
     recorder: Arc<Mutex<crate::state::RecorderState>>,
     stop_flag: Arc<AtomicBool>,
+    current_segment: Arc<AtomicUsize>,
     on_done: impl Fn() + Send + 'static,
 ) {
     {
@@ -65,44 +71,57 @@ pub fn play_project_async(
         rec.playback_state = PlaybackState::Playing;
     }
 
-
     std::thread::spawn(move || {
+        // build the queue first. Empty segments are skipped, so remember which project index each
+        // queued source belongs to
+        let rate = NonZeroU32::new(project_snapshot.sample_rate)
+            .expect("Invalid sample rate");
+        let channels = NonZeroU16::new(1).unwrap(); // force mono like play_segment_async
+
+        let mut order: Vec<usize> = Vec::new(); // order[k] = project index of k-th source
+        let mut sources: Vec<SamplesBuffer> = Vec::new();
+        for (offset, samples) in project_snapshot.segments.into_iter().enumerate() {
+            if samples.is_empty() { continue; }
+            order.push(project_snapshot.first_index + offset);
+            sources.push(SamplesBuffer::new(channels, rate, samples));
+        }
+
+        if sources.is_empty() {
+            if let Ok(mut rec) = recorder.lock() {
+                rec.playback_state = PlaybackState::Idle;
+            }
+            current_segment.store(NO_SEGMENT, Ordering::Relaxed);
+            on_done();
+            return;
+        }
+
         let mut handle = DeviceSinkBuilder::open_default_sink()
             .expect("Failed to open default audio device");
         handle.log_on_drop(false);
 
         let player = Player::connect_new(handle.mixer());
 
-        let mut all_samples: Vec<f32> = Vec::new(); // copy of all audio samples
-        for samples in project_snapshot.segments { // add all project samples to all_samples
-            all_samples.extend(samples);
+        let total = sources.len();
+        current_segment.store(order[0], Ordering::Relaxed);
+        for source in sources {
+            player.append(source);
         }
 
-        if all_samples.is_empty() {
-            if let Ok(mut rec) = recorder.lock() {
-                rec.playback_state = PlaybackState::Idle;
-            }
-            on_done();
-            return;
-        }
-
-        let channels = NonZeroU16::new(1).unwrap(); // force mono like play_segment_async
-        let rate = NonZeroU32::new(project_snapshot.sample_rate)
-            .expect("Invalid sample rate");
-
-        let source = SamplesBuffer::new(channels, rate, all_samples);
-        player.append(source);
-
+        // poll until audio ends naturally or stop_flag fires
         while !player.empty() && !stop_flag.load(Ordering::Relaxed) {
+            let played = total.saturating_sub(player.len()); // finished sources
+            if let Some(&seg_idx) = order.get(played) {
+                current_segment.store(seg_idx, Ordering::Relaxed);
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         drop(player);
+        current_segment.store(NO_SEGMENT, Ordering::Relaxed);
 
         if let Ok(mut rec) = recorder.lock() {
             rec.playback_state = PlaybackState::Idle;
         }
         on_done();
-
     });
 }
 
@@ -113,14 +132,23 @@ pub fn play_project_async(
 pub struct ProjectSnapshot {
     pub segments: Vec<Vec<f32>>,
     pub sample_rate: u32,
+    // project index of segments[0]; non-zero when playing "from here"
+    pub first_index: usize,
     // channels always mono so not needed
 }
 
 impl ProjectSnapshot {
-    pub fn from_project(project: &Project) -> Self {
+    // clones only the segments from `first_index` to the end, "play from here"
+    // doesn't copy audio that will never be played
+    pub fn from_project(project: &Project, first_index: usize) -> Self {
+        let first_index = first_index.min(project.segments.len());
         Self {
-            segments: project.segments.iter().map(|s| s.samples.clone()).collect(),
+            segments: project.segments[first_index..]
+                .iter()
+                .map(|s| s.samples.clone())
+                .collect(),
             sample_rate: project.sample_rate,
+            first_index,
         }
     }
 }
