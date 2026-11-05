@@ -1,5 +1,7 @@
 >**Talkback** is the term for when a producer or engineer communicates with a musician in the recording booth, typically via headphones, to give immediate feedback on a take like approving it as good or directing a redo with specific advice.
 
+`Parts-Of-Speech` is a voice-recording application that implements the *talkback* workflow missing in most Audio editors. I built this out of frustration of doing long post-production editing inside Audacity and most video editors.
+
 
 ---
 
@@ -83,6 +85,8 @@ consider implementing it in a future update.
 | `delete <n>`     | Delete       | Delete segment number n.                          |
 | `insert <n>`     | Insert       | Insert a new segment after position n.            |
 | `trim s/e <secs>`| Trim         | Trims the start and end of the segment by <secs>. |
+| `label <n> [text]`| Label       | Name segment n (e.g. `label 3 Chapter 1`); no text clears it. |
+| `q`              | List         | List all segments (with their labels).            |
 | `e`              | Export       | Export all confirmed segments and exit.           |
 
 
@@ -109,6 +113,7 @@ consider implementing it in a future update.
 
 6. **Edit Segments:**
    - Use `retry <n>`, `delete <n>`, and `insert <n>` to make any necessary adjustments to your segments.
+   - Give segments names so long projects are easy to navigate: double-click a segment in the GUI (Enter saves, Esc cancels, blank clears) or use `label <n> <text>` in the CLI. A retake keeps its segment's name.
 
 7. **Export:**
    - Once you are satisfied with all segments, use the `e` command to export all confirmed segments and exit the application.
