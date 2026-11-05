@@ -13,9 +13,38 @@ pub struct Segment { // a single recording take
     // if true, this segment was created as intentional silence (not a recording).
     // silence segments render differently in the GUI and support expansion (adding more
     // silence) in addition to trimming. Serialised so projects round-trip correctly.
-    // NOTE: bincode uses positional encoding, so old project files saved without this field
-    // will fail to deserialise. If you need backwards compat, migrate to a versioned format.
     pub is_silence: bool,
+    // projects are navigable by optional name instead of by index alone. None = unnamed.
+    pub label: Option<String>,
+}
+
+pub const MAX_LABEL_CHARS: usize = 60; // before turning into ellipses
+
+// bincode is positional, so adding/removing a field breaks old files
+// new saves start with this 8 byte header
+const PROJECT_MAGIC: &[u8; 8] = b"POSPRJ02";
+
+// project layout from before labels existed, only used to open old save files
+#[derive(Serialize, Deserialize)]
+struct SegmentV1 { samples: Vec<f32>, is_silence: bool }
+#[derive(Serialize, Deserialize)]
+struct ProjectV1 {
+    segments: Vec<SegmentV1>,
+    sample_rate: u32,
+    channels: u16,
+    editing_index: Option<usize>,
+}
+impl From<ProjectV1> for Project {
+    fn from(old: ProjectV1) -> Self {
+        Project {
+            segments: old.segments.into_iter()
+                .map(|s| Segment { samples: s.samples, is_silence: s.is_silence, label: None })
+                .collect(),
+            sample_rate: old.sample_rate,
+            channels: old.channels,
+            editing_index: old.editing_index,
+        }
+    }
 }
 // a segment is one recorded chunk
 // for recording replacements (retry)
@@ -73,14 +102,17 @@ pub enum Command {
     RetrySegment(usize),
     InsertAfter(usize),
     DeleteSegment(usize),
+    // name (or with None / empty text, un-name) the segment at the given index
+    RenameSegment(usize, Option<String>),
+    // MoveSegment(from, to), take the segment at `from` and put it at index `to`
+    MoveSegment(usize, usize),
     TrimStart(Option<usize>, f32),
     TrimEnd(Option<usize>, f32),   // (index, seconds) - None = current
-    // Insert a silence segment of `seconds` duration after the given index.
+    // insert a silence segment of `seconds` duration after the given index
     InsertSilenceAfter(usize, f32),
-    // Add `seconds` of extra silence to an existing silence segment at the given index.
+    // Add `seconds` of extra silence to an existing silence segment at the given index
     ExpandSilence(usize, f32),
-    // Signals the audio thread to stop playback immediately.
-    // Handled in main.rs (sets the AtomicBool stop flag); dispatch_command no-ops it.
+    // signals the audio thread to stop playback immediately
     StopPlayback,
     Undo,
     Redo,
@@ -164,15 +196,31 @@ impl RecorderState { // master struct
 
     pub fn save_to_disk(&self) {
         if let Some(path) = &self.save_path {
-            if let Ok(encoded) = bincode::serialize(&self.project) {
-                let _ = std::fs::write(path, encoded);
-            }
+            let _ = self.write_project(path);
+        }
+    }
+
+    // header + bincode, streamed straight to the file so a long project isn't copied in RAM twice
+    fn write_project(&self, path: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+        w.write_all(PROJECT_MAGIC)?;
+        bincode::serialize_into(&mut w, &self.project)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        w.flush()
+    }
+
+    fn decode_project(data: &[u8]) -> Result<Project, Box<dyn std::error::Error>> {
+        match data.strip_prefix(PROJECT_MAGIC) {
+            Some(body) => Ok(bincode::deserialize(body)?),
+            // no header: saved before labels existed
+            None => Ok(bincode::deserialize::<ProjectV1>(data)?.into()),
         }
     }
 
     pub fn load_from_disk(&mut self, path: String) -> Result<(), Box<dyn std::error::Error>> {
         let data = std::fs::read(&path)?;
-        let project: Project = bincode::deserialize(&data)?;
+        let project = Self::decode_project(&data)?;
         
         self.project = project.clone();
         self.save_path = Some(path);
@@ -263,7 +311,7 @@ impl RecorderState { // master struct
     pub fn start_recording(&mut self) {
         self.state = AppState::Recording;
         self.is_insertion = false; // append not insert
-        self.current = Some(Segment { samples: Vec::new(), is_silence: false });
+        self.current = Some(Segment { samples: Vec::new(), is_silence: false, label: None });
         self.project.editing_index = None; // None: segment at end default
         // starting a new take invalidates old undo history for the previous take
         self.previous_current = None;
@@ -283,7 +331,11 @@ impl RecorderState { // master struct
                 Some(idx) if idx <= self.project.segments.len() => { // in bound
                     if self.is_insertion { // if insert, slide it in
                         self.project.segments.insert(idx, seg);
-                    } else { // if replace, replace
+                    } else { // if replace, replace (a retake keeps the slot's name)
+                        let mut seg = seg;
+                        if seg.label.is_none() {
+                            seg.label = self.project.segments[idx].label.take();
+                        }
                         self.project.segments[idx] = seg;
                     }
                 }
@@ -314,7 +366,7 @@ impl RecorderState { // master struct
     pub fn retry_current_take(&mut self) {
         if self.state == AppState::Reviewing {
             // Create a new empty segment for the retry
-            self.current = Some(Segment { samples: Vec::new(), is_silence: false });
+            self.current = Some(Segment { samples: Vec::new(), is_silence: false, label: None });
             // Switch back to recording from Idle
             self.state = AppState::Recording; // automatically starts recording
             // IMPORTANT: We do NOT reset editing_index or is_insertion here.
@@ -330,7 +382,7 @@ impl RecorderState { // master struct
         
         self.project.editing_index = Some(index);
         self.is_insertion = false; // overwriting
-        self.current = Some(Segment { samples: Vec::new(), is_silence: false });
+        self.current = Some(Segment { samples: Vec::new(), is_silence: false, label: None });
         self.state = AppState::Recording;
         true
     }
@@ -341,7 +393,7 @@ impl RecorderState { // master struct
         
         self.project.editing_index = Some(after_index + 1); // index after
         self.is_insertion = true; // inserting
-        self.current = Some(Segment { samples: Vec::new(), is_silence: false });
+        self.current = Some(Segment { samples: Vec::new(), is_silence: false, label: None });
         self.state = AppState::Recording;
         true
     }
@@ -359,6 +411,7 @@ impl RecorderState { // master struct
         Segment {
             samples: vec![0.0; count],
             is_silence: true,
+            label: None,
         }
     }
 
@@ -380,6 +433,31 @@ impl RecorderState { // master struct
         if !seg.is_silence { return false; }
         let extra = (extra_seconds * sr as f32) as usize;
         seg.samples.extend(vec![0.0_f32; extra]);
+        true
+    }
+
+    // reorder, remove the segment at `from` and re-insert it so it ends up at index `to`
+    // only while Idle
+    pub fn move_segment(&mut self, from: usize, to: usize) -> bool {
+        let len = self.project.segments.len();
+        if self.state != AppState::Idle || from >= len || to >= len || from == to {
+            return false;
+        }
+        let seg = self.project.segments.remove(from);
+        self.project.segments.insert(to, seg);
+        true
+    }
+
+    // set or clear a segment's label. Whitespace is trimmed, an empty label clears it
+    // returns false (and changes nothing) if the index is invalid or the label is unchanged
+    pub fn rename_segment(&mut self, index: usize, label: Option<String>) -> bool {
+        let cleaned = label
+            .map(|l| l.trim().chars().take(MAX_LABEL_CHARS).collect::<String>())
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty());
+        let Some(seg) = self.project.segments.get_mut(index) else { return false };
+        if seg.label == cleaned { return false; }
+        seg.label = cleaned;
         true
     }
 
@@ -643,6 +721,12 @@ pub fn dispatch_command(rec: &mut RecorderState, cmd: Command) {
         Command::TrimEnd(idx, secs)       => { rec.trim_end(idx, secs); }
         Command::InsertSilenceAfter(i, s) => { rec.save_state(); rec.insert_silence_after(i, s); }
         Command::ExpandSilence(i, s)      => { rec.save_state(); rec.expand_silence(i, s); }
+        Command::MoveSegment(from, to)    => {
+            if rec.move_segment(from, to) { rec.save_state(); }
+            else { eprintln!("[move] rejected {} -> {} (segments: {}, idle: {})",
+                             from, to, rec.project.segments.len(), rec.state == AppState::Idle); }
+        }
+        Command::RenameSegment(i, label)  => { if rec.rename_segment(i, label) { rec.save_state(); } }
         Command::StopPlayback             => {} // handled in main.rs via AtomicBool
         Command::Undo                     => { rec.undo(); }
         Command::Redo                     => { rec.redo(); }
