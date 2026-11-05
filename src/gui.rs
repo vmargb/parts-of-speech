@@ -146,6 +146,15 @@ pub enum SeekKind {
 }
 
 // -- Helpers -------------------------------------------------------------------
+// shorten `s` to at most `max_chars` characters, ending in an ellipsis if it was cut
+fn ellipsize(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars { return s.to_string(); }
+    if max_chars == 0 { return String::new(); }
+    let mut out: String = s.chars().take(max_chars - 1).collect();
+    out.push('…');
+    out
+}
+
 fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     Color32::from_rgba_unmultiplied(
@@ -541,12 +550,17 @@ impl RecorderApp {
             let ip  = rec.playback_state == PlaybackState::Playing;
             let ii  = matches!(rec.state, AppState::Idle);
             let td: f32 = rec.project.segments.iter().map(|s| s.duration_seconds(sr)).sum();
-            // (index, sample_count, duration_secs, is_silence)
-            let meta: Vec<(usize, usize, f32, bool)> = rec.project.segments.iter().enumerate()
-                .map(|(i, s)| (i, s.samples.len(), s.duration_seconds(sr), s.is_silence))
+            // (index, sample_count, duration_secs, is_silence, label)
+            let meta: Vec<(usize, usize, f32, bool, Option<String>)> = rec.project.segments.iter().enumerate()
+                .map(|(i, s)| (i, s.samples.len(), s.duration_seconds(sr), s.is_silence, s.label.clone()))
                 .collect();
             (rec.get_segment_count(), ip, ii, td, meta)
         }; 
+
+        // drop a rename in progress if its row vanished (undo/delete/load) or we left Idle
+        if self.rename_idx.map_or(false, |i| i >= seg_count) || (!is_idle && self.rename_idx.is_some()) {
+            self.rename_idx = None;
+        }
 
         let p = &self.palette;
 
@@ -594,9 +608,10 @@ impl RecorderApp {
             .max_height(scroll_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                for (idx, n, dur, is_silence) in &meta {
+                for (idx, n, dur, is_silence, label) in &meta {
                     let selected = self.selected_segment == Some(*idx);
                     let req = self.draw_segment_row(ui, ctx, *idx, *n, *dur, *is_silence,
+                                                    label.as_deref(), meta.len(),
                                                     is_playing, is_idle, selected);
                     if let Some(edge) = req { preview_request = Some(edge); }
                     // FIX: slightly more space between rows
@@ -637,6 +652,7 @@ impl RecorderApp {
     fn draw_segment_row(
         &mut self, ui: &mut egui::Ui, ctx: &egui::Context,
         idx: usize, samples: usize, duration: f32, is_silence: bool,
+        label: Option<&str>, seg_count: usize,
         is_playing: bool, is_idle: bool, is_selected: bool,
     ) -> Option<(usize, SeekKind)> {
         let p = &self.palette;
@@ -654,7 +670,9 @@ impl RecorderApp {
         let btn_h    = 28.0_f32; 
         let btn_gap  = 4.0_f32;  
         let n_btns   = if is_idle && !is_playing { if is_silence { 3 } else { 4 } } else { 0 };
-        let btns_total = if n_btns > 0 { n_btns as f32 * btn_w + (n_btns - 1) as f32 * btn_gap + 8.0 } else { 0.0 };
+        // narrow column of move up / move down arrows to the left of the text buttons
+        let arrows_w = 22.0_f32 + btn_gap;
+        let btns_total = if n_btns > 0 { n_btns as f32 * btn_w + (n_btns - 1) as f32 * btn_gap + 8.0 + arrows_w } else { 0.0 };
 
         // -- allocate the whole row (advances layout cursor) -------------------
         let (row_rect, _) = ui.allocate_exact_size(Vec2::new(row_w, total_h), Sense::hover());
@@ -713,12 +731,30 @@ impl RecorderApp {
             egui::Align2::LEFT_CENTER,
             format!("{:02}:{:04.1}", dm, duration % 60.0), FontId::monospace(12.0), p.text);
 
+        // single-line look, a labelled row shows its name on top and the small detail beneath
+        let detail_x     = row_rect.min.x + 140.0;
+        let detail_right = row_rect.min.x + (row_w - btns_total - 10.0).max(10.0) - 8.0;
+        let label_txt    = label.filter(|l| !l.is_empty());
+        let is_renaming  = self.rename_idx == Some(idx);
+        let detail_y     = if label_txt.is_some() || is_renaming { cy + 9.0 } else { cy };
+
+        if let (Some(name), false) = (label_txt, is_renaming) {
+            let max_chars = ((detail_right - detail_x).max(0.0) / 7.0) as usize; // ~7px per char
+            let clip = Rect::from_min_max(
+                Pos2::new(detail_x, row_rect.min.y),
+                Pos2::new(detail_right.max(detail_x), row_rect.min.y + main_h));
+            ui.painter().with_clip_rect(clip).text(
+                Pos2::new(detail_x, cy - 8.0), egui::Align2::LEFT_CENTER,
+                ellipsize(name, max_chars), FontId::monospace(11.5),
+                if is_now_playing { p.amber } else { p.text });
+        }
+
         if is_silence {
             // "SILENCE" badge replaces the sample count to make the type obvious at a glance.
             // Draw a small filled pill for the badge background, then the text on top.
-            let badge_x = row_rect.min.x + 140.0;
+            let badge_x = detail_x;
             let badge_rect = Rect::from_center_size(
-                Pos2::new(badge_x + 24.0, cy),
+                Pos2::new(badge_x + 24.0, detail_y),
                 Vec2::new(52.0, 14.0));
             ui.painter().rect_filled(badge_rect, Rounding::same(3.0),
                 Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 40));
@@ -726,7 +762,7 @@ impl RecorderApp {
                 "SILENCE", FontId::monospace(7.5),
                 blend(p.blue, p.text, 0.55));
         } else {
-            ui.painter().text(Pos2::new(row_rect.min.x + 140.0, cy),
+            ui.painter().text(Pos2::new(detail_x, detail_y),
                 egui::Align2::LEFT_CENTER,
                 format!("{} smp", samples), FontId::monospace(9.0), p.dim);
         }
@@ -738,6 +774,18 @@ impl RecorderApp {
         if info_resp.hovered() && is_idle {
             ui.painter().rect_filled(info_rect, Rounding::same(5.0),
                 Color32::from_rgba_unmultiplied(255, 255, 255, 5));
+        }
+        // full name on hover (the row may have truncated it)
+        if let (Some(name), false) = (label_txt, is_renaming) {
+            let _ = info_resp.clone().on_hover_text(format!("{name}\n(double-click to rename)"));
+        }
+
+        // double-click start renaming, first click already toggled the expand panel
+        if info_resp.double_clicked() && is_idle && !is_renaming {
+            self.selected_segment = if is_selected { None } else { Some(idx) };
+            self.rename_idx = Some(idx);
+            self.rename_buf = label_txt.unwrap_or("").to_string();
+            self.rename_focus_pending = true;
         }
 
         // -- action buttons (right side, explicit pixel positions) -------------
@@ -758,7 +806,37 @@ impl RecorderApp {
             ];
             let specs = if is_silence { specs_silence } else { specs_normal };
 
-            let start_x = row_rect.max.x - btns_total + 4.0;
+            // move up / move down (stacked arrows)
+            let arrows_x = row_rect.max.x - btns_total + 4.0;
+            for (k, up) in [true, false].into_iter().enumerate() {
+                let enabled = if up { idx > 0 } else { idx + 1 < seg_count };
+                let h_each  = (btn_h - 2.0) / 2.0;
+                let r = Rect::from_min_size(
+                    Pos2::new(arrows_x, row_rect.min.y + (main_h - btn_h) / 2.0 + k as f32 * (h_each + 2.0)),
+                    Vec2::new(22.0, h_each));
+                let resp = ui.interact(r, ui.id().with(("mv", idx, k)),
+                    if enabled { Sense::click() } else { Sense::hover() });
+                let hot = enabled && resp.hovered();
+                let col = if hot { p.blue } else if enabled { p.dim } else { p.muted };
+                ui.painter().rect(r, Rounding::same(3.0),
+                    if hot { Color32::from_rgba_unmultiplied(p.blue.r(), p.blue.g(), p.blue.b(), 35) } else { p.surf2 },
+                    Stroke::new(1.0_f32, if hot { p.blue } else { p.border }));
+                let c = r.center();
+                let tri = if up {
+                    vec![Pos2::new(c.x - 4.0, c.y + 2.0), Pos2::new(c.x + 4.0, c.y + 2.0), Pos2::new(c.x, c.y - 2.5)]
+                } else {
+                    vec![Pos2::new(c.x - 4.0, c.y - 2.0), Pos2::new(c.x + 4.0, c.y - 2.0), Pos2::new(c.x, c.y + 2.5)]
+                };
+                ui.painter().add(egui::Shape::convex_polygon(tri, col, Stroke::NONE));
+                if enabled { let _ = resp.clone().on_hover_text(if up { "Move up" } else { "Move down" }); }
+                if enabled && resp.clicked() {
+                    let to = if up { idx - 1 } else { idx + 1 };
+                    pending = Some(Command::MoveSegment(idx, to));
+                    ctx.request_repaint();
+                }
+            }
+
+            let start_x = row_rect.max.x - btns_total + 4.0 + arrows_w;
             for (i, (lbl, col, cmd_fn)) in specs.iter().enumerate() {
                 let x = start_x + i as f32 * (btn_w + btn_gap);
                 let btn_rect = Rect::from_min_size(
@@ -779,13 +857,38 @@ impl RecorderApp {
         }
 
         // -- toggle expand on info click (only if no button was clicked) -------
-        if info_resp.clicked() && pending.is_none() && is_idle {
+        if info_resp.clicked() && !info_resp.double_clicked() && pending.is_none() && is_idle {
             if is_selected {
                 self.selected_segment = None;
             } else {
                 // expanding a new segment: reset the seek bar to the beginning
                 self.seek_offset_secs  = 0.0;
                 self.selected_segment  = Some(idx);
+            }
+        }
+
+        // -- inline rename editor ----------------------------------------------
+        // enter or clicking elsewhere commits, Esc cancels, blank text clears the label
+        if self.rename_idx == Some(idx) {
+            let edit_rect = Rect::from_min_max(
+                Pos2::new(detail_x - 4.0, row_rect.min.y + 8.0),
+                Pos2::new(detail_right.max(detail_x + 80.0), row_rect.min.y + 8.0 + 22.0));
+            let first_frame = self.rename_focus_pending;
+            let te = ui.put(edit_rect, egui::TextEdit::singleline(&mut self.rename_buf)
+                .font(FontId::monospace(11.5))
+                .text_color(p.text)
+                .hint_text("label…")
+                .char_limit(crate::state::MAX_LABEL_CHARS));
+            if first_frame {
+                te.request_focus();
+                self.rename_focus_pending = false;
+            } else if te.lost_focus() {
+                let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if !cancelled {
+                    pending = Some(Command::RenameSegment(idx, Some(std::mem::take(&mut self.rename_buf))));
+                }
+                self.rename_idx = None;
+                ctx.request_repaint();
             }
         }
 
@@ -1168,7 +1271,22 @@ impl RecorderApp {
         }
 
         // execute trim/expand/silence command first, then signal playback of the edge preview
-        if let Some(cmd) = pending { self.handle_command(cmd); }
+        if let Some(cmd) = pending {
+            // a reorder shifts indices, carry the expanded row along, drop any rename in
+            // progress, and discard waveform peaks cached under the old positions
+            if let Command::MoveSegment(from, to) = cmd {
+                self.rename_idx = None;
+                self.selected_segment = self.selected_segment.map(|s| {
+                    if s == from { to }
+                    else if from < to && s > from && s <= to { s - 1 }
+                    else if from > to && s >= to && s < from { s + 1 }
+                    else { s }
+                });
+                let (lo, hi) = (from.min(to), from.max(to));
+                self.waveform_cache.retain(|&k, _| k < lo || k > hi);
+            }
+            self.handle_command(cmd);
+        }
 
         // stop_and_seek is set when the user clicks the seek bar during playback.
         // self.handle_command can't be called inside the allocate_new_ui closure
@@ -1329,6 +1447,7 @@ impl RecorderApp {
                         ("?",                     "Toggle keybindings panel",    p.mono),
                         ("Esc",                   "Close any open panel",        p.dim),
                         ("click segment row",     "Expand / collapse panel",     p.blue),
+                        ("dbl-click segment row", "Name / rename segment",       p.blue),
                         ("hover segment row",     "Reveal play / retry / del",   p.dim),
                         ("+ silence after",       "Insert silence (in expand)",  p.blue),
                         ("expand +",              "Lengthen silence segment",    p.blue),
@@ -1635,6 +1754,9 @@ impl RecorderApp {
             let s = state_label(&rec);
             (s, rec.playback_state == PlaybackState::Playing, rec.get_segment_count())
         }; // recorder mutex fully released here
+
+        // typing a segment label: letters must not fire R / S / C / P ... shortcuts
+        if self.rename_idx.is_some() && ctx.wants_keyboard_input() { return; }
 
         ctx.input(|i| {
             // no recorder access inside this closure no deadlock possible.
