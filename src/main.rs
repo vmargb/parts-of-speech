@@ -107,6 +107,9 @@ pub struct RecorderApp {
     // The segment the list was last auto-scrolled to, so we only scroll when the
     // playing segment changes instead of fighting the user's scroll wheel
     pub last_scrolled_segment:   Option<usize>,
+    pub rename_idx:              Option<usize>, // inline segment renaming
+    pub rename_buf:              String,
+    pub rename_focus_pending:    bool,
     pub show_keybindings:  bool,
     pub show_settings:     bool,
     pub theme:             themes::ThemeKind,
@@ -155,6 +158,9 @@ impl RecorderApp {
             pending_seek:            None,
             playing_segment:         Arc::new(AtomicUsize::new(NO_SEGMENT)),
             last_scrolled_segment:   None,
+            rename_idx:              None,
+            rename_buf:              String::new(),
+            rename_focus_pending:    false,
             show_keybindings:  false,
             show_settings:     false,
             theme,
@@ -216,7 +222,7 @@ impl RecorderApp {
             };
             let preview_samples = seg.samples[start..end].to_vec();
             if preview_samples.is_empty() { return; }
-            let preview_seg = Segment { samples: preview_samples, is_silence: false };
+            let preview_seg = Segment { samples: preview_samples, is_silence: false, label: None };
             drop(rec);
             self.stop_playback.store(false, Ordering::Relaxed);
             play_segment_async(preview_seg, sr, self.recorder.clone(),
@@ -269,7 +275,7 @@ impl RecorderApp {
         self.stop_playback.store(false, Ordering::Relaxed);
         let recorder = self.recorder.clone();
         play_segment_async(
-            Segment { samples: cue, is_silence: false },
+            Segment { samples: cue, is_silence: false, label: None },
             sample_rate,
             self.recorder.clone(),
             self.stop_playback.clone(),
@@ -609,6 +615,8 @@ fn run_cli() {
             }
             println!("\n  {}  {} <secs> | {} #n", "TRIM:".dimmed(), "trim start|end".yellow(), "delete".red());
             println!("  {}  {} #n [secs]  |  {} #n [secs]", "SILENCE:".dimmed(), "silence".yellow(), "expand".yellow());
+            println!("  {}  {} #n [text]  (name a segment, no text clears it)", "LABEL:".dimmed(), "label".yellow());
+            println!("  {}  {} #n up|down|#m  (reorder segments)", "MOVE:".dimmed(), "move".yellow());
             println!("  {}  {} [secs|off]  (cue the audio before a take)", "PRE-ROLL:".dimmed(), "preroll".yellow());
             println!("  {}  {}", "EXIT:".dimmed(), "e (export) | quit".red());
             println!("{}", "-".repeat(60).cyan());
@@ -751,6 +759,53 @@ fn run_cli() {
                     println!("Usage: expand <segment_number> [seconds]");
                     println!("Example: expand 3       (add 0.5s to silence segment 3)");
                     println!("         expand 3 1.5   (add 1.5s to silence segment 3)");
+                }
+            }
+            // move <n> up | down | <m>  ->  reorder segment n (1-based), <m> = new position
+            "move" => {
+                let count = app.recorder.lock().unwrap().get_segment_count();
+                let from = parts.get(1).and_then(|s| s.parse::<usize>().ok()).filter(|&n| n >= 1 && n <= count);
+                let to = match (from, parts.get(2).map(|s| s.to_lowercase())) {
+                    (Some(n), Some(d)) if d == "up"   => n.checked_sub(1).filter(|&t| t >= 1),
+                    (Some(n), Some(d)) if d == "down" => Some(n + 1).filter(|&t| t <= count),
+                    (Some(_), Some(d)) => d.parse::<usize>().ok().filter(|&t| t >= 1 && t <= count),
+                    _ => None,
+                };
+                match (from, to) {
+                    (Some(f), Some(t)) if f != t => {
+                        app.handle_command(Command::MoveSegment(f - 1, t - 1));
+                        println!("Moved segment {} to position {}.", f, t);
+                    }
+                    (Some(_), Some(_)) => println!("Already there."),
+                    _ => {
+                        println!("Usage: move <n> up | down | <position>   (1 to {})", count);
+                        println!("Example: move 7 up       move 7 2   (put segment 7 at position 2)");
+                    }
+                }
+            }
+            // label <n> [text...]  ->  name segment n (1-based), no text clears the name
+            "label" => {
+                match parts.get(1).and_then(|s| s.parse::<usize>().ok()).filter(|&n| n >= 1) {
+                    Some(n) => {
+                        let count = app.recorder.lock().unwrap().get_segment_count();
+                        if n > count {
+                            println!("No segment {}.", n);
+                        } else {
+                            let text = parts[2..].join(" ");
+                            let label = if text.is_empty() { None } else { Some(text) };
+                            app.handle_command(Command::RenameSegment(n - 1, label));
+                            let rec = app.recorder.lock().unwrap();
+                            match rec.get_segment(n - 1).and_then(|s| s.label.as_deref()) {
+                                Some(l) => println!("Segment {} is now \"{}\".", n, l),
+                                None    => println!("Segment {} has no label.", n),
+                            }
+                        }
+                    }
+                    None => {
+                        println!("Usage: label <segment_number> [text]");
+                        println!("Example: label 3 Chapter 1 intro   (name segment 3)");
+                        println!("         label 3                   (clear the name)");
+                    }
                 }
             }
             "trim" => {
